@@ -90,6 +90,9 @@ PASSWORD="${HUAWEI_SWR_PASSWORD:-}"
 TAG="${IMAGE_TAG:-latest}"
 # 默认目标架构 linux/amd64 (华为云 ECS 部署目标); 避免在 arm64 机器上把错误架构的基础镜像推入 SWR
 PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
+# 可选代理: 为 buildx builder 注入代理, 加速 buildkitd 拉取基础镜像 (例 http://127.0.0.1:7890)
+PROXY="${BUILD_PROXY:-}"
+BUILDER=""
 
 # 构建开关
 BUILD_FRONTEND=false
@@ -123,6 +126,7 @@ usage() {
       --org <org>        指定 SWR 组织名 (覆盖 HUAWEI_SWR_ORG)
       --registry <url>   指定仓库地址 (覆盖 HUAWEI_SWR_REGISTRY)
       --platform <p>     指定构建平台 (覆盖 DOCKER_PLATFORM, 例 linux/amd64)
+      --proxy <url>      为 buildx builder 注入代理, 加速拉取基础镜像 (覆盖 BUILD_PROXY)
       --all              构建全部三个业务镜像 (未指定单项时的默认行为)
       --frontend         仅构建前端镜像 deepaudit-frontend
       --backend          仅构建后端镜像 deepaudit-backend
@@ -152,6 +156,7 @@ while [[ $# -gt 0 ]]; do
         --org)         require_value "$1" "${2:-}"; ORG="$2"; shift 2 ;;
         --registry)    require_value "$1" "${2:-}"; REGISTRY="$2"; shift 2 ;;
         --platform)    require_value "$1" "${2:-}"; PLATFORM="$2"; shift 2 ;;
+        --proxy)       require_value "$1" "${2:-}"; PROXY="$2"; shift 2 ;;
         --all)        ANY_SELECTED=true; BUILD_FRONTEND=true; BUILD_BACKEND=true; BUILD_SANDBOX=true; shift ;;
         --frontend)   ANY_SELECTED=true; BUILD_FRONTEND=true; shift ;;
         --backend)    ANY_SELECTED=true; BUILD_BACKEND=true; shift ;;
@@ -252,7 +257,35 @@ login_swr() {
 }
 
 # ---------------------------------------------------------------------------
-# 构建 -> 标记 -> 推送 单个镜像
+# 可选: 创建带代理的 buildx builder (docker-container driver)
+#   使 buildkitd 拉取基础镜像 (FROM ...) 走代理, 加速慢速源的层下载
+# ---------------------------------------------------------------------------
+setup_builder() {
+    BUILDER=""
+    if [[ -z "${PROXY}" ]]; then
+        return 0
+    fi
+    BUILDER="swr-proxy-builder"
+    if docker buildx inspect "${BUILDER}" >/dev/null 2>&1; then
+        print_info "复用已有代理 builder: ${BUILDER} (proxy=${PROXY})"
+        return 0
+    fi
+    print_step "创建带代理的 buildx builder: ${BUILDER} (proxy=${PROXY})"
+    if docker buildx create --name "${BUILDER}" --driver docker-container \
+        --driver-opt image=docker.m.daocloud.io/moby/buildkit:latest \
+        --driver-opt "env.HTTP_PROXY=${PROXY}" \
+        --driver-opt "env.HTTPS_PROXY=${PROXY}" \
+        --driver-opt "env.http_proxy=${PROXY}" \
+        --driver-opt "env.https_proxy=${PROXY}"; then
+        print_info "代理 builder 创建成功, 构建时基础镜像拉取将走代理。"
+    else
+        print_warn "创建代理 builder 失败, 回退默认 builder (拉取不走代理)。"
+        BUILDER=""
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 构建 -> 推送 单个镜像 (buildx --push, 禁用 attestation)
 #   $1 镜像名 (deepaudit-frontend / deepaudit-backend / deepaudit-sandbox)
 #   $2 构建上下文
 #   $3 Dockerfile 路径
@@ -274,43 +307,43 @@ build_and_push() {
         return 1
     fi
 
-    # ---- 构建 ----
+    if [[ "${DO_PUSH}" == true ]]; then
+        # ---- 构建并直接推送 (buildx --push) ----
+        # --provenance=false --sbom=false: 禁用 attestation, 产出 SWR 可接受的单一 manifest;
+        #   否则 SWR 报 "Invalid image, fail to parse 'manifest.json'"
+        local bx_args=(buildx build --push --provenance=false --sbom=false -f "${dockerfile}" -t "${swr_image}")
+        [[ -n "${PLATFORM}" ]]      && bx_args+=(--platform "${PLATFORM}")
+        [[ -n "${BUILDER}" ]]       && bx_args+=(--builder "${BUILDER}")
+        [[ "${NO_CACHE}" == true ]] && bx_args+=(--no-cache)
+        print_info "[1/1] 构建并推送: ${swr_image}  (context=${context})"
+        if ! docker "${bx_args[@]}" "${context}"; then
+            print_error "构建/推送 ${name} 失败。请查看上方 buildx 日志。"
+            FAILED_ITEMS+=("${name} (buildx push 失败)")
+            return 1
+        fi
+        print_info "推送成功: ${swr_image}"
+        PUSHED_IMAGES+=("${swr_image}")
+        return 0
+    fi
+
+    # ---- --no-push: 仅构建并标记到本地 ----
     local build_args=(-f "${dockerfile}" -t "${local_image}")
     [[ -n "${PLATFORM}" ]]      && build_args+=(--platform "${PLATFORM}")
     [[ "${NO_CACHE}" == true ]] && build_args+=(--no-cache)
-
-    print_info "[1/3] 构建镜像: ${local_image}  (context=${context})"
+    print_info "[1/2] 构建镜像: ${local_image}  (context=${context})"
     if ! docker build "${build_args[@]}" "${context}"; then
         print_error "构建 ${name} 失败。请查看上方 docker build 日志。"
         FAILED_ITEMS+=("${name} (build 失败)")
         return 1
     fi
-    print_info "构建成功: ${local_image}"
-
-    # ---- 标记 ----
-    print_info "[2/3] 标记镜像: ${local_image} -> ${swr_image}"
+    print_info "[2/2] 标记镜像: ${local_image} -> ${swr_image}"
     if ! docker tag "${local_image}" "${swr_image}"; then
         print_error "标记 ${name} 失败。"
         FAILED_ITEMS+=("${name} (tag 失败)")
         return 1
     fi
-
-    # ---- 推送 ----
-    if [[ "${DO_PUSH}" != true ]]; then
-        print_warn "[3/3] 已指定 --no-push, 跳过推送 (镜像已标记为 ${swr_image})。"
-        PUSHED_IMAGES+=("${swr_image} (未推送)")
-        return 0
-    fi
-
-    print_info "[3/3] 推送镜像: ${swr_image}"
-    if ! docker push "${swr_image}"; then
-        print_error "推送 ${name} 失败。请确认组织 '${ORG}' 存在且账号有推送权限。"
-        FAILED_ITEMS+=("${name} (push 失败)")
-        return 1
-    fi
-
-    print_info "推送成功: ${swr_image}"
-    PUSHED_IMAGES+=("${swr_image}")
+    print_warn "已指定 --no-push, 跳过推送 (镜像已标记为 ${swr_image})。"
+    PUSHED_IMAGES+=("${swr_image} (未推送)")
     return 0
 }
 
@@ -424,6 +457,7 @@ summary() {
 main() {
     preflight
     login_swr
+    setup_builder
 
     # 使用 `|| true` 让单个镜像失败不中断整体流程, 失败信息统一在 summary 汇总
     if [[ "${BUILD_FRONTEND}" == true ]]; then

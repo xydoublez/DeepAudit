@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================
 # DeepAudit Frontend Docker 构建
 # =============================================
@@ -27,10 +28,12 @@ RUN npm config set registry https://registry.npmmirror.com && \
 # 复制依赖文件
 COPY package.json pnpm-lock.yaml ./
 
-# 增加网络超时设置和并发数限制，防止 ARM 架构构建卡死
-RUN pnpm config set network-timeout 300000 && \
+# pnpm store 缓存挂载: 重复构建复用依赖缓存, 不再每次全量下载
+# 移除 --network-concurrency 1 (单连接下载极慢); 如 ARM 构建卡死可临时加回该参数
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm config set network-timeout 300000 && \
     pnpm config set fetch-retries 5 && \
-    pnpm install --no-frozen-lockfile --network-concurrency 1
+    pnpm install --frozen-lockfile
 
 # 复制源代码
 COPY . .

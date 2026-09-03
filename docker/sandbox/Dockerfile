@@ -1,8 +1,13 @@
+# syntax=docker/dockerfile:1
 # DeepAudit Agent Sandbox
 # 安全沙箱环境用于漏洞验证和 PoC 执行
 # 集成各类安全扫描工具 (Semgrep, Bandit, Gitleaks, etc.)
 
 FROM docker.m.daocloud.io/python:3.11-bullseye
+
+# apt 镜像源与 GitHub 下载代理 (可按网络覆盖, 例: --build-arg GH_PROXY=https://ghproxy.com/)
+ARG APT_MIRROR=mirrors.aliyun.com
+ARG GH_PROXY=
 
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
@@ -10,9 +15,11 @@ LABEL description="Secure sandbox environment for vulnerability verification and
 # 安装基本工具
 # 安装基本工具
 # 使用阿里云镜像加速 apt
-RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
+    sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list && \
+    sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
@@ -29,8 +36,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     build-essential \
     cmake \
     clang \
-    llvm \
-    && rm -rf /var/lib/apt/lists/*
+    llvm
 
 # 安装 Node.js (用于 JavaScript/TypeScript 代码执行 和 npm audit)
 # 使用淘宝/阿里云镜像加速
@@ -59,8 +65,9 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     chmod -R a+w /usr/local/cargo
 
 # 安装 Python 安全工具
-RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
     requests \
     httpx \
     aiohttp \
@@ -77,7 +84,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 
 # 安装 Gitleaks
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -L https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz && \
+    curl -L ${GH_PROXY}https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz && \
     tar -xzf gitleaks.tar.gz && \
     mv gitleaks /usr/local/bin/ && \
     rm gitleaks.tar.gz
@@ -88,7 +95,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 
 # 安装 OSV-Scanner
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -L https://github.com/google/osv-scanner/releases/download/v1.6.2/osv-scanner_1.6.2_linux_amd64 -o /usr/local/bin/osv-scanner && \
+    curl -L ${GH_PROXY}https://github.com/google/osv-scanner/releases/download/v1.6.2/osv-scanner_1.6.2_linux_amd64 -o /usr/local/bin/osv-scanner && \
     chmod +x /usr/local/bin/osv-scanner
 
 # 创建非 root 用户
