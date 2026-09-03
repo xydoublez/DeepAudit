@@ -5,9 +5,12 @@
 
 FROM docker.m.daocloud.io/python:3.11-bullseye
 
-# apt 镜像源与 GitHub 下载代理 (可按网络覆盖, 例: --build-arg GH_PROXY=https://ghproxy.com/)
+# apt 镜像源 / pip 索引 / GitHub 下载代理 (可按网络覆盖)
+# 例: --build-arg GH_PROXY=https://ghproxy.com/ 或 --build-arg PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG APT_MIRROR=mirrors.aliyun.com
 ARG GH_PROXY=
+# pip 索引: 默认阿里云 (与 apt 同域, 可达性已验证); 清华源在部分构建网络下不可达
+ARG PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/
 
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
@@ -67,7 +70,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 # 安装 Python 安全工具
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    pip install -i ${PIP_INDEX} \
     requests \
     httpx \
     aiohttp \
