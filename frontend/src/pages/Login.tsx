@@ -1,80 +1,91 @@
 /**
- * Login Page
+ * Login Page — Casdoor SSO 单点登录入口
  * Cyberpunk Terminal Aesthetic
+ *
+ * 仅 SSO 登录：SSO 启用时自动顶层导航到后端 /api/v1/auth/sso/login（门户已登录且
+ * 开启 Auto Signin 时全程免点击直通），并保留手动按钮兜底；
+ * 由后端代理完成 OAuth 2.0 授权码 + PKCE 流程，回调后携带本地令牌返回前端。
  */
 
-import { useState, FormEvent, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/shared/context/AuthContext";
 import { apiClient } from "@/shared/api/serverClient";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
-import { Lock, Mail, Terminal, Shield, Fingerprint, Cpu } from "lucide-react";
+import { Terminal, Shield, Fingerprint, KeyRound, AlertTriangle } from "lucide-react";
 import { version } from "../../package.json";
 
+// 后端 SSO 登录入口（相对前端域，经 nginx / vite 代理到后端）
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+const SSO_LOGIN_URL = `${API_BASE}/auth/sso/login`;
+
+// 自动跳转冷却标记：回调持续失败时防止登录页↔门户无限循环跳转
+const SSO_AUTO_REDIRECT_KEY = "sso_auto_redirect_at";
+const AUTO_REDIRECT_COOLDOWN_MS = 60_000;
+
 export default function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
+  // null=检测中, true=已启用, false=未启用
+  const [ssoEnabled, setSsoEnabled] = useState<boolean | null>(null);
+  const [hasError, setHasError] = useState(false);
+  const [autoRedirecting, setAutoRedirecting] = useState(false);
+  const [cooldownActive, setCooldownActive] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuth();
 
   const from = location.state?.from?.pathname || "/";
 
-  useEffect(() => {
-    const savedEmail = localStorage.getItem("remembered_email");
-    if (savedEmail) {
-      setEmail(savedEmail);
-      setRememberMe(true);
-    }
-  }, []);
-
+  // 已登录则直接跳转到目标页
   useEffect(() => {
     if (isAuthenticated && !loading) {
       navigate(from, { replace: true });
     }
   }, [isAuthenticated, navigate, from, loading]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      const formData = new URLSearchParams();
-      formData.append("username", email);
-      formData.append("password", password);
-
-      const response = await apiClient.post("/auth/login", formData, {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      });
-
-      if (rememberMe) {
-        localStorage.setItem("remembered_email", email);
-      } else {
-        localStorage.removeItem("remembered_email");
+  // 查询后端 SSO 是否启用
+  useEffect(() => {
+    const checkSso = async () => {
+      try {
+        const res = await apiClient.get("/auth/sso/config");
+        setSsoEnabled(Boolean(res.data?.enabled));
+      } catch {
+        setSsoEnabled(false);
       }
+    };
+    checkSso();
+  }, []);
 
-      await login(response.data.access_token, rememberMe);
-      toast.success("登录成功");
-    } catch (error: any) {
-      const detail = error.response?.data?.detail;
-      if (Array.isArray(detail)) {
-        const messages = detail.map((err: any) => err.msg || err.message || JSON.stringify(err)).join('; ');
-        toast.error(messages || "登录失败");
-      } else if (typeof detail === 'object') {
-        toast.error(detail.msg || detail.message || JSON.stringify(detail));
-      } else {
-        toast.error(detail || "登录失败，请检查邮箱和密码");
-      }
-    } finally {
-      setLoading(false);
+  // 展示回调/跳转带回的错误信息（?error=xxx）
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get("error");
+    if (err) {
+      setHasError(true);
+      toast.error(decodeURIComponent(err));
+      window.history.replaceState({}, "", "/login");
     }
+  }, []);
+
+  // SSO 启用后自动发起授权跳转：门户会话存在且开启 Auto Signin 时免点击直通
+  // 防循环：冷却期内已自动跳转并回到登录页、或本次携带错误时不再自动跳转
+  useEffect(() => {
+    if (ssoEnabled !== true || hasError) return;
+    const last = Number(sessionStorage.getItem(SSO_AUTO_REDIRECT_KEY) || 0);
+    if (Date.now() - last < AUTO_REDIRECT_COOLDOWN_MS) {
+      setCooldownActive(true);
+      return;
+    }
+    sessionStorage.setItem(SSO_AUTO_REDIRECT_KEY, String(Date.now()));
+    setAutoRedirecting(true);
+    window.location.href = SSO_LOGIN_URL;
+  }, [ssoEnabled, hasError]);
+
+  const handleSsoLogin = () => {
+    setLoading(true);
+    // 顶层导航到后端 SSO 入口（后端 302 → Casdoor 授权端点）
+    window.location.href = SSO_LOGIN_URL;
   };
 
   return (
@@ -121,7 +132,7 @@ export default function Login() {
         </div>
         <div className="flex items-center gap-2">
           <Fingerprint className="w-4 h-4" />
-          <span>AUTH: READY</span>
+          <span>SSO: CASDOOR</span>
         </div>
       </div>
 
@@ -163,7 +174,7 @@ export default function Login() {
           </p>
         </div>
 
-        {/* Login Form Card */}
+        {/* SSO Login Card */}
         <div className="cyber-dialog border border-border/60 rounded-lg overflow-hidden"
              style={{ boxShadow: '0 4px 30px rgba(0,0,0,0.5)' }}>
           {/* Card Header */}
@@ -179,95 +190,61 @@ export default function Login() {
           </div>
 
           <div className="p-6">
-            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-              <div className="space-y-2">
-                <Label
-                  htmlFor="email"
-                  className="font-mono text-sm text-muted-foreground uppercase tracking-wider"
-                >
-                  邮箱地址
-                </Label>
-                <div className="relative">
-                  <Input
-                    id="email"
-                    type="email"
-                    placeholder="your@email.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    className="h-12 pl-11 font-mono cyber-bg-elevated border-border/50 text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:ring-0"
-                  />
-                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <div className="flex flex-col gap-5">
+              <div className="text-center space-y-2">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full border border-primary/30 cyber-bg-elevated">
+                  <KeyRound className="w-8 h-8 text-primary" />
                 </div>
+                <p className="font-mono text-sm text-muted-foreground">
+                  // 通过统一身份认证平台登录
+                </p>
               </div>
 
-              <div className="space-y-2">
-                <Label
-                  htmlFor="password"
-                  className="font-mono text-sm text-muted-foreground uppercase tracking-wider"
-                >
-                  密码
-                </Label>
-                <div className="relative">
-                  <Input
-                    id="password"
-                    type="password"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="h-12 pl-11 font-mono cyber-bg-elevated border-border/50 text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:ring-0"
-                  />
-                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              {ssoEnabled === false && (
+                <div className="flex items-start gap-2 p-3 rounded border border-yellow-500/40 bg-yellow-500/10">
+                  <AlertTriangle className="w-4 h-4 text-yellow-500 mt-0.5 shrink-0" />
+                  <p className="font-mono text-xs text-yellow-500/90 leading-relaxed">
+                    单点登录未启用，请联系管理员在后端配置 CASDOOR_ENABLED 及应用凭证。
+                  </p>
                 </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Checkbox
-                    id="remember"
-                    checked={rememberMe}
-                    onCheckedChange={(checked) =>
-                      setRememberMe(checked as boolean)
-                    }
-                    className="border-border data-[state=checked]:bg-primary data-[state=checked]:border-primary"
-                  />
-                  <Label
-                    htmlFor="remember"
-                    className="text-base font-mono text-muted-foreground cursor-pointer"
-                  >
-                    记住我
-                  </Label>
-                </div>
-              </div>
+              )}
 
               <Button
-                type="submit"
+                type="button"
+                onClick={handleSsoLogin}
+                disabled={loading || autoRedirecting || ssoEnabled === null || ssoEnabled === false}
                 className="w-full h-12 text-base font-bold uppercase tracking-wider bg-primary hover:bg-primary/90 text-foreground border border-primary/50 transition-all"
                 style={{ boxShadow: '0 0 20px rgba(255,107,44,0.3)' }}
-                disabled={loading}
               >
-                {loading ? (
+                {loading || autoRedirecting ? (
                   <span className="flex items-center gap-2">
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    验证中...
+                    正在跳转统一认证...
+                  </span>
+                ) : ssoEnabled === null ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    检测中...
                   </span>
                 ) : (
-                  "登 录"
+                  <span className="flex items-center gap-2">
+                    <Fingerprint className="w-5 h-5" />
+                    使用 SSO 单点登录
+                  </span>
                 )}
               </Button>
-            </form>
+
+              {(cooldownActive || hasError) && (
+                <p className="text-center font-mono text-xs text-muted-foreground">
+                  // 自动跳转已暂停，请手动点击登录
+                </p>
+              )}
+            </div>
 
             {/* Footer */}
             <div className="mt-6 pt-5 border-t border-border text-center">
               <p className="text-base font-mono text-muted-foreground">
-                还没有账号？{" "}
-                <span
-                  className="text-primary font-bold cursor-pointer hover:underline"
-                  onClick={() => navigate("/register")}
-                >
-                  立即注册
-                </span>
+                OAuth 2.0 · PKCE · OpenID Connect
               </p>
             </div>
           </div>

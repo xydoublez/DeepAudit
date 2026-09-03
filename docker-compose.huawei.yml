@@ -1,0 +1,159 @@
+# =============================================
+# DeepAudit 华为云 SWR 生产环境部署配置
+# =============================================
+# 使用推送到华为云 SWR (swr.cn-north-4.myhuaweicloud.com) 的预构建镜像, 无需本地构建。
+#
+# 前置条件:
+#   1. 已通过 scripts/push-to-huawei-swr.sh 将业务镜像推送到华为云 SWR,
+#      并已用 `--base` 开关推送基础依赖镜像 (postgres/redis):
+#        ./scripts/push-to-huawei-swr.sh --base
+#   2. 部署主机(宿主机, 非容器内)已登录 SWR — 后端通过挂载的 docker.sock 触发宿主 dockerd 拉取沙箱镜像:
+#        # 切勿用 -p 明文传参 (会泄露到 ps / shell history / 云审计日志)
+#        read -rs SWR_PASS && printf '%s' "$SWR_PASS" | \
+#          docker login -u <region>@<AK> --password-stdin swr.cn-north-4.myhuaweicloud.com
+#   3. 在同目录创建 .env 文件 (或通过环境变量) 提供下列变量:
+#        (scripts/push-to-huawei-swr.sh 也会自动读取本 .env 的 SWR_ORG/SWR_REGISTRY/IMAGE_TAG;
+#         但凭证 HUAWEI_SWR_USERNAME/HUAWEI_SWR_PASSWORD 请用环境变量注入, 勿写入 .env)
+#        SWR_ORG=你的SWR组织名          # 必填
+#        SWR_REGISTRY=swr.cn-north-4.myhuaweicloud.com   # 可选, 默认此值
+#        IMAGE_TAG=latest               # 可选, 默认 latest
+#        LLM_PROVIDER=openai            # 可选, LLM 相关配置
+#        LLM_MODEL=gpt-4o
+#        LLM_API_KEY=your-api-key-here
+#        LLM_BASE_URL=
+#
+# 部署命令:
+#   docker compose -f docker-compose.huawei.yml up -d
+# 查看日志:
+#   docker compose -f docker-compose.huawei.yml logs -f
+#
+# 镜像地址规律 (全部来自华为云 SWR):
+#   - 业务镜像: ${SWR_REGISTRY}/${SWR_ORG}/deepaudit-<组件>:${IMAGE_TAG}
+#   - 基础镜像: ${SWR_REGISTRY}/${SWR_ORG}/postgres:15-alpine、.../redis:7-alpine (保留原始版本标签)
+
+services:
+  # =============================================
+  # 核心基础服务
+  # =============================================
+  db:
+    # 基础镜像同样来自华为云 SWR (需先执行 ./scripts/push-to-huawei-swr.sh --base 推送)
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/postgres:15-alpine
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=deepaudit
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deepaudit-network
+
+  redis:
+    # 基础镜像同样来自华为云 SWR (需先执行 ./scripts/push-to-huawei-swr.sh --base 推送)
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deepaudit-network
+
+  # =============================================
+  # 后端服务 (镜像来自华为云 SWR)
+  # =============================================
+  backend:
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    volumes:
+      - backend_uploads:/app/uploads
+      # 沙箱执行必须: 后端通过 docker.sock 拉起并管理沙箱容器
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/deepaudit
+      - REDIS_URL=redis://redis:6379/0
+      - AGENT_ENABLED=true
+      - SANDBOX_ENABLED=true
+      # 沙箱镜像同样指向 SWR, 后端会按需拉取 (要求宿主机已登录 SWR)
+      - SANDBOX_IMAGE=${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-sandbox:${IMAGE_TAG:-latest}
+      # LLM 配置 - 请根据需要修改 (建议通过 .env 提供, 不要提交密钥)
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - LLM_API_KEY=${LLM_API_KEY:-your-api-key-here}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      # 禁用代理 - 必须同时设置大小写变量
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
+      - all_proxy=
+      - ALL_PROXY=
+      - NO_PROXY=*
+      - no_proxy=*
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - deepaudit-network
+
+  # 数据库迁移服务 - 在后端启动前自动执行 (复用后端镜像)
+  db-migrate:
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-backend:${IMAGE_TAG:-latest}
+    restart: "no"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/deepaudit
+    command: [".venv/bin/alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - deepaudit-network
+
+  # =============================================
+  # 前端服务 (镜像来自华为云 SWR)
+  # =============================================
+  frontend:
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      # 禁用代理 - nginx 需要直连后端
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
+      - NO_PROXY=*
+    depends_on:
+      - backend
+    networks:
+      - deepaudit-network
+
+  # 预拉取沙箱镜像 (后端会按需调用); 确保镜像在本地就绪
+  sandbox-pull:
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-sandbox:${IMAGE_TAG:-latest}
+    restart: "no"
+    command: echo "Sandbox image ready"
+
+networks:
+  deepaudit-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  backend_uploads:
+  redis_data:

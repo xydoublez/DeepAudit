@@ -18,8 +18,10 @@ ENV no_proxy="*"
 ENV NO_PROXY="*"
 
 # 配置国内 npm 镜像源
+# ⚠ pnpm 锁定 v9：pnpm 10 移除了 network-timeout/fetch-retries 配置键
+#   (ERR_PNPM_CONFIG_SET_UNSUPPORTED_YAML_CONFIG_KEY)，且与 lockfileVersion 9.0 匹配
 RUN npm config set registry https://registry.npmmirror.com && \
-    npm install -g pnpm && \
+    npm install -g pnpm@9 && \
     pnpm config set registry https://registry.npmmirror.com
 
 # 复制依赖文件

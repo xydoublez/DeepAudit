@@ -85,7 +85,34 @@ class Settings(BaseSettings):
     
     # 输出语言配置 - 支持 zh-CN（中文）和 en-US（英文）
     OUTPUT_LANGUAGE: str = "zh-CN"
-    
+
+    # ============ Casdoor SSO 单点登录配置 ============
+    # 是否启用 Casdoor SSO（启用后前端登录页仅提供 SSO 登录入口）
+    CASDOOR_ENABLED: bool = False
+    # Casdoor 服务地址（门户固定地址）
+    CASDOOR_ENDPOINT: str = "https://portal.msuncloud.cn"
+    # 应用 Client ID（Casdoor 管理后台 → 应用编辑页获取）
+    CASDOOR_CLIENT_ID: Optional[str] = None
+    # 应用 Client Secret（仅服务端使用，禁止下发前端）
+    CASDOOR_CLIENT_SECRET: Optional[str] = None
+    # OAuth 授权范围（必须包含 openid，遵循最小权限原则）
+    CASDOOR_SCOPE: str = "openid profile email"
+    # 后端 OAuth 回调地址（须与 Casdoor 后台 Redirect URIs 完全一致）
+    # 示例: http://localhost:8000/api/v1/auth/sso/callback
+    CASDOOR_REDIRECT_URI: Optional[str] = None
+    # 前端站点地址（SSO 完成后重定向回前端携带令牌）
+    # 示例: http://localhost:5173（本地）/ https://your-app.com（生产）
+    CASDOOR_FRONTEND_URL: str = "http://localhost:5173"
+    # CAS 风格登出页的 owner/app 路径段（浏览器友好登出回跳，见对接文档 3.7 勘误）
+    CASDOOR_LOGOUT_OWNER: str = "zymsunsoft"
+    CASDOOR_LOGOUT_APP: str = "portal"
+    # 承载 OAuth 临时状态(state/nonce/code_verifier)的签名 Cookie 名称
+    CASDOOR_STATE_COOKIE_NAME: str = "casdoor_oauth_state"
+    # OAuth 临时状态有效期（秒），须 ≤ 授权码 5 分钟有效期
+    CASDOOR_STATE_TTL_SECONDS: int = 300
+    # 调用 Casdoor API 的 HTTP 超时时间（秒）
+    CASDOOR_HTTP_TIMEOUT: int = 15
+
     # ============ Agent 模块配置 ============
 
     # 嵌入模型配置（独立于 LLM 配置）

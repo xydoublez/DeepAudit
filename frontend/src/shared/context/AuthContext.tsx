@@ -14,7 +14,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (token: string, rememberMe?: boolean) => Promise<void>;
-  logout: () => void;
+  logout: (redirectSso?: boolean) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -35,6 +35,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           setIsAuthenticated(true);
         } catch (error) {
           console.error('Auth check failed', error);
+          // 被动失效：仅本地清理，不触发 Casdoor 单点登出（避免误登出 IdP）
           logout();
         }
       }
@@ -65,11 +66,22 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const logout = () => {
+  const logout = (redirectSso: boolean = false) => {
+    const provider =
+      sessionStorage.getItem('auth_provider') || localStorage.getItem('auth_provider');
     localStorage.removeItem('access_token');
     sessionStorage.removeItem('access_token');
+    localStorage.removeItem('auth_provider');
+    sessionStorage.removeItem('auth_provider');
     setUser(null);
     setIsAuthenticated(false);
+
+    // SSO 会话且显式请求时，跳转后端 /auth/sso/logout 实现单点登出
+    // （后端会重定向到 Casdoor CAS 登出页并回跳前端登录页）
+    if (redirectSso && provider === 'sso') {
+      const apiBase = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+      window.location.href = `${apiBase}/auth/sso/logout`;
+    }
   };
 
   return (
@@ -86,4 +98,3 @@ export const useAuth = () => {
   }
   return context;
 };
-

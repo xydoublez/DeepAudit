@@ -128,13 +128,13 @@ export default function Account() {
   };
 
   const handleLogout = () => {
-    logout();
+    logout(true);
     toast.success("已退出登录");
     navigate('/login');
   };
 
   const handleSwitchAccount = () => {
-    logout();
+    logout(true);
     navigate('/login');
   };
 
