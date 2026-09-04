@@ -37,7 +37,7 @@ services:
   # =============================================
   db:
     # 基础镜像同样来自华为云 SWR (需先执行 ./scripts/push-to-huawei-swr.sh --base 推送)
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/postgres:15-alpine
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/postgres:15-alpine
     restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -55,7 +55,7 @@ services:
 
   redis:
     # 基础镜像同样来自华为云 SWR (需先执行 ./scripts/push-to-huawei-swr.sh --base 推送)
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/redis:7-alpine
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/redis:7-alpine
     restart: unless-stopped
     volumes:
       - redis_data:/data
@@ -71,7 +71,7 @@ services:
   # 后端服务 (镜像来自华为云 SWR)
   # =============================================
   backend:
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-backend:${IMAGE_TAG:-latest}
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/deepaudit-backend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     volumes:
       - backend_uploads:/app/uploads
@@ -85,7 +85,7 @@ services:
       - AGENT_ENABLED=true
       - SANDBOX_ENABLED=true
       # 沙箱镜像同样指向 SWR, 后端会按需拉取 (要求宿主机已登录 SWR)
-      - SANDBOX_IMAGE=${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-sandbox:${IMAGE_TAG:-latest}
+      - SANDBOX_IMAGE=${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/deepaudit-sandbox:${IMAGE_TAG:-latest}
       # LLM 配置 - 请根据需要修改 (建议通过 .env 提供, 不要提交密钥)
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - LLM_MODEL=${LLM_MODEL:-gpt-4o}
@@ -112,7 +112,7 @@ services:
 
   # 数据库迁移服务 - 在后端启动前自动执行 (复用后端镜像)
   db-migrate:
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-backend:${IMAGE_TAG:-latest}
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/deepaudit-backend:${IMAGE_TAG:-latest}
     restart: "no"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/deepaudit
@@ -127,7 +127,7 @@ services:
   # 前端服务 (镜像来自华为云 SWR)
   # =============================================
   frontend:
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-frontend:${IMAGE_TAG:-latest}
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/deepaudit-frontend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     ports:
       - "3000:80"
@@ -145,7 +145,7 @@ services:
 
   # 预拉取沙箱镜像 (后端会按需调用); 确保镜像在本地就绪
   sandbox-pull:
-    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:?请在 .env 中设置 SWR_ORG 组织名}/deepaudit-sandbox:${IMAGE_TAG:-latest}
+    image: ${SWR_REGISTRY:-swr.cn-north-4.myhuaweicloud.com}/${SWR_ORG:-chis-devops}/deepaudit-sandbox:${IMAGE_TAG:-latest}
     restart: "no"
     command: echo "Sandbox image ready"
 
