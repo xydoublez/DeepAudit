@@ -34,7 +34,8 @@ import {
   Github,
   Folder,
   ArrowUpRight,
-  Key
+  Key,
+  FileUp
 } from "lucide-react";
 import { api } from "@/shared/config/database";
 import { validateZipFile } from "@/features/projects/services";
@@ -45,13 +46,20 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import CreateTaskDialog from "@/components/audit/CreateTaskDialog";
 import TerminalProgressDialog from "@/components/audit/TerminalProgressDialog";
+import ProjectImportDialog from "@/components/projects/ProjectImportDialog";
 import { SUPPORTED_LANGUAGES, REPOSITORY_PLATFORMS } from "@/shared/constants";
+
+const PAGE_SIZE = 24; // 项目列表每页显示数量（3 列 × 8 行）
 
 export default function Projects() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initialLoaded, setInitialLoaded] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
   const [showCreateTaskDialog, setShowCreateTaskDialog] = useState(false);
   const [selectedProjectForTask, setSelectedProjectForTask] = useState<string>("");
   const [showTerminal, setShowTerminal] = useState(false);
@@ -125,6 +133,7 @@ export default function Projects() {
       toast.error("加载项目失败");
     } finally {
       setLoading(false);
+      setInitialLoaded(true);
     }
   };
 
@@ -272,6 +281,77 @@ export default function Projects() {
     project.description?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  // 分页：解决 1000+ 项目一次性渲染的卡顿问题
+  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pagedProjects = filteredProjects.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  const goToPage = (page: number) => {
+    const target = Math.min(Math.max(1, page), totalPages);
+    setCurrentPage(target);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    setPageInput(String(safePage));
+  }, [safePage]);
+
+  // 分页控件（列表顶部与底部共用）
+  const paginationControls = filteredProjects.length > PAGE_SIZE ? (
+    <div className="cyber-card p-3 flex flex-wrap items-center justify-center gap-3 relative z-10">
+      <Button
+        variant="outline" size="sm" className="cyber-btn-outline h-8"
+        disabled={safePage <= 1}
+        onClick={() => goToPage(1)}
+      >
+        首页
+      </Button>
+      <Button
+        variant="outline" size="sm" className="cyber-btn-outline h-8"
+        disabled={safePage <= 1}
+        onClick={() => goToPage(safePage - 1)}
+      >
+        上一页
+      </Button>
+      <span className="font-mono text-sm text-muted-foreground flex items-center gap-2">
+        第
+        <input
+          type="number"
+          min={1}
+          max={totalPages}
+          value={pageInput}
+          onChange={(e) => setPageInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const p = parseInt(pageInput, 10);
+              goToPage(Number.isFinite(p) ? p : 1);
+            }
+          }}
+          onBlur={() => {
+            const p = parseInt(pageInput, 10);
+            goToPage(Number.isFinite(p) ? p : 1);
+          }}
+          className="cyber-input w-16 h-8 text-center font-mono"
+        />
+        / {totalPages} 页 · 共 {filteredProjects.length} 个项目
+      </span>
+      <Button
+        variant="outline" size="sm" className="cyber-btn-outline h-8"
+        disabled={safePage >= totalPages}
+        onClick={() => goToPage(safePage + 1)}
+      >
+        下一页
+      </Button>
+      <Button
+        variant="outline" size="sm" className="cyber-btn-outline h-8"
+        disabled={safePage >= totalPages}
+        onClick={() => goToPage(totalPages)}
+      >
+        末页
+      </Button>
+    </div>
+  ) : null;
+
   const getRepositoryIcon = (type?: string) => {
     switch (type) {
       case 'github': return <Github className="w-5 h-5" />;
@@ -402,7 +482,7 @@ export default function Projects() {
     });
   };
 
-  if (loading) {
+    if (loading && !initialLoaded) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center space-y-4">
@@ -417,6 +497,13 @@ export default function Projects() {
     <div className="space-y-6 p-6 bg-background min-h-screen font-mono relative">
       {/* Grid background */}
       <div className="absolute inset-0 cyber-grid-subtle pointer-events-none" />
+
+      {/* CSV 批量导入对话框 */}
+      <ProjectImportDialog
+        open={showImportDialog}
+        onOpenChange={setShowImportDialog}
+        onImported={loadProjects}
+      />
 
       {/* 创建项目对话框 */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
@@ -805,20 +892,27 @@ export default function Projects() {
           <Input
             placeholder="搜索项目..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
             className="cyber-input !pl-10"
           />
         </div>
+        <Button variant="outline" className="font-mono h-10" onClick={() => setShowImportDialog(true)}>
+          <FileUp className="w-4 h-4 mr-2" />
+          导入 CSV
+        </Button>
         <Button className="cyber-btn-primary h-10" onClick={() => setShowCreateDialog(true)}>
           <Plus className="w-4 h-4 mr-2" />
           新建项目
         </Button>
       </div>
 
+      {/* 分页控件（顶部） */}
+      {paginationControls}
+
       {/* Project List */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 relative z-10">
-        {filteredProjects.length > 0 ? (
-          filteredProjects.map((project) => (
+        {pagedProjects.length > 0 ? (
+          pagedProjects.map((project) => (
             <div key={project.id} className="cyber-card flex flex-col h-full group">
               {/* Card Header */}
               <div className="p-4 border-b border-border bg-muted/50 flex justify-between items-start">
@@ -933,6 +1027,9 @@ export default function Projects() {
           </div>
         )}
       </div>
+
+      {/* 分页控件（底部） */}
+      {paginationControls}
 
       {/* Create Task Dialog */}
       <CreateTaskDialog

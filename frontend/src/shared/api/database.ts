@@ -50,8 +50,9 @@ export const api = {
 
   // ==================== Project 相关方法 ====================
 
-  async getProjects(): Promise<Project[]> {
-    const res = await apiClient.get('/projects/');
+  async getProjects(limit: number = 10000): Promise<Project[]> {
+    // 显式传递大 limit，避免后端默认 limit=100 截断（大批量导入的项目需全部可见）
+    const res = await apiClient.get('/projects/', { params: { limit } });
     return res.data;
   },
 

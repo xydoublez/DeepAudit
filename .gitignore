@@ -190,3 +190,8 @@ examples/
 chroma/
 
 backend/data/vector_db/
+
+# Generated data exports and reports (may contain internal data)
+frontend/public/project_import_data.csv
+backend/scripts/*_report.csv
+backend/scripts/cleanup_backup_*.csv
