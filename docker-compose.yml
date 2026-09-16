@@ -41,6 +41,9 @@ services:
         - all_proxy=
         - ALL_PROXY=
     restart: unless-stopped
+    # 必须大于 BATCH_AUDIT_SHUTDOWN_TIMEOUT（默认 25s），否则定时批量审计的停机
+    # 收尾会被 SIGKILL 打断，导致批次状态滞留 running、克隆的仓库目录不被清理
+    stop_grace_period: 40s
     volumes:
       # - ./backend/app:/app/app:ro  # 挂载代码目录，修改后自动生效
       - backend_uploads:/app/uploads

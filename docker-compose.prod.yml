@@ -38,6 +38,9 @@ services:
   backend:
     image: ghcr.io/lintsinghua/deepaudit-backend:latest
     restart: unless-stopped
+    # 必须大于 BATCH_AUDIT_SHUTDOWN_TIMEOUT（默认 25s），否则定时批量审计的停机
+    # 收尾会被 SIGKILL 打断，导致批次状态滞留 running、克隆的仓库目录不被清理
+    stop_grace_period: 40s
     volumes:
       - backend_uploads:/app/uploads
       - /var/run/docker.sock:/var/run/docker.sock
@@ -63,6 +66,11 @@ services:
       - ALL_PROXY=
       - NO_PROXY=*
       - no_proxy=*
+      # 定时批量审计（详见 backend/env.example）
+      # 全局 LLM 并发上限：N 个任务 × 每任务多个子 Agent 直打上游易触发 429
+      - AGENT_GLOBAL_LLM_CONCURRENCY=${AGENT_GLOBAL_LLM_CONCURRENCY:-10}
+      # 停机时等待在跑批次收尾的上限，必须小于上方的 stop_grace_period
+      - BATCH_AUDIT_SHUTDOWN_TIMEOUT=${BATCH_AUDIT_SHUTDOWN_TIMEOUT:-25}
     depends_on:
       db:
         condition: service_healthy
