@@ -21,6 +21,18 @@
 #        LLM_MODEL=gpt-4o
 #        LLM_API_KEY=your-api-key-here
 #        LLM_BASE_URL=
+#        # ---- Casdoor SSO 单点登录 (默认启用; 前端登录页仅保留 SSO 入口) ----
+#        CASDOOR_ENABLED=true               # 默认启用; 设为 false 可关闭单点登录
+#        CASDOOR_ENDPOINT=https://portal.msuncloud.cn      # 门户地址, 一般无需修改
+#        CASDOOR_CLIENT_ID=your_casdoor_client_id          # 应用凭证 (Casdoor 后台获取)
+#        CASDOOR_CLIENT_SECRET=your_casdoor_client_secret  # ⚠ 机密, 建议用环境变量注入勿写入 .env
+#        CASDOOR_SCOPE=openid profile email
+#        # ⚠ 回调/前端地址须“浏览器可访问”且与前端同源(经 nginx :3000 代理到 backend),
+#        #    否则承载 state/nonce 的签名 Cookie 无法在 login/callback 间往返, 登录必失败:
+#        CASDOOR_REDIRECT_URI=http://<宿主机IP或域名>:3000/api/v1/auth/sso/callback
+#        CASDOOR_FRONTEND_URL=http://<宿主机IP或域名>:3000
+#        CASDOOR_LOGOUT_OWNER=zymsunsoft
+#        CASDOOR_LOGOUT_APP=portal
 #
 # 部署命令:
 #   docker compose -f docker-compose.huawei.yml up -d
@@ -91,6 +103,23 @@ services:
       - LLM_MODEL=${LLM_MODEL:-gpt-4o}
       - LLM_API_KEY=${LLM_API_KEY:-your-api-key-here}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
+      # ===== Casdoor SSO 单点登录配置 (默认启用; 登录页仅提供 SSO 入口) =====
+      # 以下值经 .env/环境变量提供, 且须与 Casdoor 后台登记的应用信息完全一致
+      # 注: 仅当 CLIENT_ID/CLIENT_SECRET/REDIRECT_URI 均配置后 SSO 才真正生效, 否则自动回退普通登录
+      - CASDOOR_ENABLED=${CASDOOR_ENABLED:-true}
+      - CASDOOR_ENDPOINT=${CASDOOR_ENDPOINT:-https://portal.msuncloud.cn}
+      - CASDOOR_CLIENT_ID=${CASDOOR_CLIENT_ID:-}
+      - CASDOOR_CLIENT_SECRET=${CASDOOR_CLIENT_SECRET:-}
+      - CASDOOR_SCOPE=${CASDOOR_SCOPE:-openid profile email}
+      # ⚠ 回调地址必须“浏览器可访问”且与前端同源(经 nginx :3000 代理到 backend),
+      #    签名 Cookie 才能在 /sso/login 与 /sso/callback 间往返; 切勿直连 backend :8000
+      #    例: https://your-app.com/api/v1/auth/sso/callback 或 http://<宿主机IP>:3000/api/v1/auth/sso/callback
+      - CASDOOR_REDIRECT_URI=${CASDOOR_REDIRECT_URI:-}
+      # 前端站点地址(SSO 完成后携带令牌重定向回前端), 须与上面回调同源
+      #    例: https://your-app.com 或 http://<宿主机IP>:3000
+      - CASDOOR_FRONTEND_URL=${CASDOOR_FRONTEND_URL:-}
+      - CASDOOR_LOGOUT_OWNER=${CASDOOR_LOGOUT_OWNER:-zymsunsoft}
+      - CASDOOR_LOGOUT_APP=${CASDOOR_LOGOUT_APP:-portal}
       # 禁用代理 - 必须同时设置大小写变量
       - HTTP_PROXY=
       - HTTPS_PROXY=
@@ -138,6 +167,8 @@ services:
       - http_proxy=
       - https_proxy=
       - NO_PROXY=*
+      # 前端 API 基址: 经 nginx 同源代理到 backend (SSO 回调与签名 Cookie 依赖同源)
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api/v1}
     depends_on:
       - backend
     networks:
