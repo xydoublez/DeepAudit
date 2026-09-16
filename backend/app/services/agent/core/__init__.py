@@ -18,7 +18,15 @@ DeepAudit Agent 核心模块
 """
 
 from .state import AgentState, AgentStatus
-from .registry import AgentRegistry, agent_registry
+from .registry import (
+    AgentRegistry,
+    agent_registry,
+    get_agent_registry,
+    bind_task_registry,
+    get_task_registry,
+    unbind_task_registry,
+    list_active_task_registries,
+)
 from .message import AgentMessage, MessageType, MessagePriority, MessageBus, message_bus
 from .executor import (
     DynamicAgentExecutor,
@@ -176,6 +184,11 @@ __all__ = [
     # Registry
     "AgentRegistry",
     "agent_registry",
+    "get_agent_registry",
+    "bind_task_registry",
+    "get_task_registry",
+    "unbind_task_registry",
+    "list_active_task_registries",
     # Message
     "AgentMessage",
     "MessageType",

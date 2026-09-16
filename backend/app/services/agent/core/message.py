@@ -9,12 +9,17 @@ Agent 间通信机制
 
 import logging
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# 全局消息历史上限。message_bus 是模块级单例，定时批量审计下单个进程会
+# 连续跑上千个任务，无界累积会持续吃内存直到重启才能回收，因此用环形缓冲。
+MESSAGE_HISTORY_LIMIT = 2000
 
 
 class MessageType(str, Enum):
@@ -113,7 +118,7 @@ class MessageBus:
     
     def __init__(self):
         self._queues: Dict[str, List[AgentMessage]] = {}
-        self._message_history: List[AgentMessage] = []
+        self._message_history: Deque[AgentMessage] = deque(maxlen=MESSAGE_HISTORY_LIMIT)
     
     def create_queue(self, agent_id: str) -> None:
         """为Agent创建消息队列"""
@@ -275,7 +280,8 @@ class MessageBus:
         limit: int = 100,
     ) -> List[AgentMessage]:
         """获取消息历史"""
-        history = self._message_history
+        # deque 不支持切片，先转 list
+        history: List[AgentMessage] = list(self._message_history)
         
         if agent_id:
             history = [

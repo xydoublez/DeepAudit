@@ -13,7 +13,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .registry import agent_registry
+from .registry import AgentRegistry, agent_registry, get_agent_registry
 from .message import message_bus, MessageType, MessagePriority
 
 logger = logging.getLogger(__name__)
@@ -31,18 +31,25 @@ class AgentGraphController:
     
     # ============ Agent 控制 ============
     
-    def stop_agent(self, agent_id: str) -> Dict[str, Any]:
+    def stop_agent(
+        self,
+        agent_id: str,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """
         停止指定Agent
         
         Args:
             agent_id: Agent ID
+            registry: 作用域注册表（为空时使用当前上下文的注册表）
             
         Returns:
             操作结果
         """
+        reg = registry or get_agent_registry()
+
         with self._lock:
-            node = agent_registry.get_agent_node(agent_id)
+            node = reg.get_agent_node(agent_id)
             if not node:
                 return {
                     "success": False,
@@ -59,12 +66,12 @@ class AgentGraphController:
                 }
             
             # 获取Agent状态对象
-            agent_state = agent_registry.get_agent_state(agent_id)
+            agent_state = reg.get_agent_state(agent_id)
             if agent_state:
                 agent_state.request_stop()
             
             # 获取Agent实例
-            agent_instance = agent_registry.get_agent(agent_id)
+            agent_instance = reg.get_agent(agent_id)
             if agent_instance:
                 if hasattr(agent_instance, "cancel"):
                     agent_instance.cancel()
@@ -72,7 +79,7 @@ class AgentGraphController:
                     agent_instance._cancelled = True
             
             # 更新状态
-            agent_registry.update_agent_status(agent_id, "stopping")
+            reg.update_agent_status(agent_id, "stopping")
             
             logger.info(f"Stop request sent to agent: {node['name']} ({agent_id})")
             
@@ -84,17 +91,25 @@ class AgentGraphController:
                 "note": "Agent将在当前迭代完成后停止",
             }
     
-    def stop_all_agents(self, exclude_root: bool = True) -> Dict[str, Any]:
+    def stop_all_agents(
+        self,
+        exclude_root: bool = True,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """
         停止所有Agent
         
         Args:
             exclude_root: 是否排除根Agent
+            registry: 作用域注册表（为空时使用当前上下文的注册表）
+                    并发审计场景下必须传入目标任务的注册表，
+                    否则会连带停止其他任务的 Agent
             
         Returns:
             操作结果
         """
-        tree = agent_registry.get_agent_tree()
+        reg = registry or get_agent_registry()
+        tree = reg.get_agent_tree()
         root_id = tree.get("root_agent_id")
         
         stopped = []
@@ -107,7 +122,7 @@ class AgentGraphController:
             if node.get("status") in ["completed", "failed", "stopped"]:
                 continue
             
-            result = self.stop_agent(agent_id)
+            result = self.stop_agent(agent_id, registry=reg)
             if result.get("success"):
                 stopped.append(agent_id)
             else:
@@ -128,6 +143,7 @@ class AgentGraphController:
         message: str,
         message_type: str = "information",
         priority: str = "normal",
+        registry: Optional[AgentRegistry] = None,
     ) -> Dict[str, Any]:
         """
         向指定Agent发送消息
@@ -138,11 +154,13 @@ class AgentGraphController:
             message: 消息内容
             message_type: 消息类型
             priority: 优先级
+            registry: 作用域注册表
             
         Returns:
             操作结果
         """
-        node = agent_registry.get_agent_node(target_agent_id)
+        reg = registry or get_agent_registry()
+        node = reg.get_agent_node(target_agent_id)
         if not node:
             return {
                 "success": False,
@@ -184,6 +202,7 @@ class AgentGraphController:
         self,
         target_agent_id: str,
         message: str,
+        registry: Optional[AgentRegistry] = None,
     ) -> Dict[str, Any]:
         """
         发送用户消息到Agent
@@ -191,6 +210,7 @@ class AgentGraphController:
         Args:
             target_agent_id: 目标Agent ID
             message: 消息内容
+            registry: 作用域注册表
             
         Returns:
             操作结果
@@ -201,22 +221,29 @@ class AgentGraphController:
             message=message,
             message_type="instruction",
             priority="high",
+            registry=registry,
         )
     
     # ============ 状态查询 ============
     
-    def get_agent_graph(self, current_agent_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_agent_graph(
+        self,
+        current_agent_id: Optional[str] = None,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """
         获取Agent图结构
         
         Args:
             current_agent_id: 当前Agent ID（用于标识）
+            registry: 作用域注册表
             
         Returns:
             Agent图信息
         """
-        tree = agent_registry.get_agent_tree()
-        stats = agent_registry.get_statistics()
+        reg = registry or get_agent_registry()
+        tree = reg.get_agent_tree()
+        stats = reg.get_statistics()
         
         # 构建树形视图
         tree_view = self._build_tree_view(tree, current_agent_id)
@@ -277,10 +304,14 @@ class AgentGraphController:
         _build_node(root_id)
         return "\n".join(lines)
     
-    def get_agent_status_summary(self) -> Dict[str, Any]:
+    def get_agent_status_summary(
+        self,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """获取Agent状态摘要"""
-        stats = agent_registry.get_statistics()
-        tree = agent_registry.get_agent_tree()
+        reg = registry or get_agent_registry()
+        stats = reg.get_statistics()
+        tree = reg.get_agent_tree()
         
         # 详细状态列表
         agents_by_status = {
@@ -306,17 +337,23 @@ class AgentGraphController:
             "has_active_agents": stats.get("running", 0) > 0 or stats.get("waiting", 0) > 0,
         }
     
-    def check_active_agents(self, exclude_agent_id: Optional[str] = None) -> Dict[str, Any]:
+    def check_active_agents(
+        self,
+        exclude_agent_id: Optional[str] = None,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """
         检查是否有活跃的Agent
         
         Args:
             exclude_agent_id: 要排除的Agent ID
+            registry: 作用域注册表
             
         Returns:
             活跃Agent信息
         """
-        tree = agent_registry.get_agent_tree()
+        reg = registry or get_agent_registry()
+        tree = reg.get_agent_tree()
         
         running = []
         waiting = []
@@ -354,9 +391,13 @@ class AgentGraphController:
     
     # ============ 结果收集 ============
     
-    def collect_all_findings(self) -> List[Dict[str, Any]]:
+    def collect_all_findings(
+        self,
+        registry: Optional[AgentRegistry] = None,
+    ) -> List[Dict[str, Any]]:
         """收集所有Agent的发现"""
-        tree = agent_registry.get_agent_tree()
+        reg = registry or get_agent_registry()
+        tree = reg.get_agent_tree()
         all_findings = []
         
         for agent_id, node in tree["nodes"].items():
@@ -386,9 +427,12 @@ class AgentGraphController:
         
         return all_findings
     
-    def get_findings_summary(self) -> Dict[str, Any]:
+    def get_findings_summary(
+        self,
+        registry: Optional[AgentRegistry] = None,
+    ) -> Dict[str, Any]:
         """获取发现摘要"""
-        findings = self.collect_all_findings()
+        findings = self.collect_all_findings(registry=registry)
         
         severity_counts = {
             "critical": 0,
@@ -419,15 +463,27 @@ class AgentGraphController:
     
     # ============ 清理 ============
     
-    def cleanup(self) -> None:
-        """清理所有Agent和消息"""
-        agent_registry.clear()
-        message_bus.clear_all()
+    def cleanup(self, registry: Optional[AgentRegistry] = None) -> None:
+        """清理作用域内的 Agent 与消息队列
+
+        不再调用 message_bus.clear_all()，否则会清掉其他并发审计任务的队列。
+        """
+        reg = registry or get_agent_registry()
+        tree = reg.get_agent_tree()
+
+        for agent_id in tree["nodes"].keys():
+            message_bus.delete_queue(agent_id)
+
+        reg.clear()
         logger.info("Agent graph cleaned up")
     
-    def cleanup_finished_agents(self) -> int:
+    def cleanup_finished_agents(
+        self,
+        registry: Optional[AgentRegistry] = None,
+    ) -> int:
         """清理已完成的Agent实例"""
-        return agent_registry.cleanup_finished_agents()
+        reg = registry or get_agent_registry()
+        return reg.cleanup_finished_agents()
 
 
 # 全局控制器实例
@@ -436,39 +492,58 @@ agent_graph_controller = AgentGraphController()
 
 # ============ 便捷函数 ============
 
-def stop_agent(agent_id: str) -> Dict[str, Any]:
+def stop_agent(agent_id: str, registry: Optional[AgentRegistry] = None) -> Dict[str, Any]:
     """停止指定Agent"""
-    return agent_graph_controller.stop_agent(agent_id)
+    return agent_graph_controller.stop_agent(agent_id, registry=registry)
 
 
-def stop_all_agents(exclude_root: bool = True) -> Dict[str, Any]:
+def stop_all_agents(
+    exclude_root: bool = True,
+    registry: Optional[AgentRegistry] = None,
+) -> Dict[str, Any]:
     """停止所有Agent"""
-    return agent_graph_controller.stop_all_agents(exclude_root)
+    return agent_graph_controller.stop_all_agents(exclude_root, registry=registry)
 
 
-def send_user_message(target_agent_id: str, message: str) -> Dict[str, Any]:
+def send_user_message(
+    target_agent_id: str,
+    message: str,
+    registry: Optional[AgentRegistry] = None,
+) -> Dict[str, Any]:
     """发送用户消息"""
-    return agent_graph_controller.send_user_message(target_agent_id, message)
+    return agent_graph_controller.send_user_message(
+        target_agent_id, message, registry=registry
+    )
 
 
-def get_agent_graph(current_agent_id: Optional[str] = None) -> Dict[str, Any]:
+def get_agent_graph(
+    current_agent_id: Optional[str] = None,
+    registry: Optional[AgentRegistry] = None,
+) -> Dict[str, Any]:
     """获取Agent图"""
-    return agent_graph_controller.get_agent_graph(current_agent_id)
+    return agent_graph_controller.get_agent_graph(current_agent_id, registry=registry)
 
 
-def check_active_agents(exclude_agent_id: Optional[str] = None) -> Dict[str, Any]:
+def check_active_agents(
+    exclude_agent_id: Optional[str] = None,
+    registry: Optional[AgentRegistry] = None,
+) -> Dict[str, Any]:
     """检查活跃Agent"""
-    return agent_graph_controller.check_active_agents(exclude_agent_id)
+    return agent_graph_controller.check_active_agents(
+        exclude_agent_id, registry=registry
+    )
 
 
-def collect_all_findings() -> List[Dict[str, Any]]:
+def collect_all_findings(
+    registry: Optional[AgentRegistry] = None,
+) -> List[Dict[str, Any]]:
     """收集所有发现"""
-    return agent_graph_controller.collect_all_findings()
+    return agent_graph_controller.collect_all_findings(registry=registry)
 
 
-def cleanup_graph() -> None:
+def cleanup_graph(registry: Optional[AgentRegistry] = None) -> None:
     """清理Agent图"""
-    agent_graph_controller.cleanup()
+    agent_graph_controller.cleanup(registry=registry)
 
 
 __all__ = [

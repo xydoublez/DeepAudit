@@ -4,6 +4,7 @@ import ProjectDetail from "@/pages/ProjectDetail";
 import RecycleBin from "@/pages/RecycleBin";
 import InstantAnalysis from "@/pages/InstantAnalysis";
 import AuditTasks from "@/pages/AuditTasks";
+import BatchAudit from "@/pages/BatchAudit";
 import TaskDetail from "@/pages/TaskDetail";
 import AgentAudit from "@/pages/AgentAudit";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -60,6 +61,12 @@ const routes: RouteConfig[] = [
     name: "审计任务",
     path: "/audit-tasks",
     element: <AuditTasks />,
+    visible: true,
+  },
+  {
+    name: "批量定时审计",
+    path: "/batch-audit",
+    element: <BatchAudit />,
     visible: true,
   },
   {

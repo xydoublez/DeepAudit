@@ -21,7 +21,7 @@ import logging
 import uuid
 
 from ..core.state import AgentState, AgentStatus
-from ..core.registry import agent_registry
+from ..core.registry import get_agent_registry
 from ..core.message import message_bus, MessageType, AgentMessage
 
 logger = logging.getLogger(__name__)
@@ -323,7 +323,8 @@ class BaseAgent(ABC):
         
         logger.debug(f"[AgentTree] 正在注册 Agent: {self.config.name} (id={self._agent_id}, parent={self.parent_id})")
         
-        agent_registry.register_agent(
+        registry = get_agent_registry()
+        registry.register_agent(
             agent_id=self._agent_id,
             agent_name=self.config.name,
             agent_type=self.config.agent_type.value,
@@ -338,7 +339,7 @@ class BaseAgent(ABC):
         message_bus.create_queue(self._agent_id)
         self._registered = True
         
-        tree = agent_registry.get_agent_tree()
+        tree = registry.get_agent_tree()
         logger.debug(f"[AgentTree] Agent 注册完成: {self.config.name}, 当前树节点数: {len(tree['nodes'])}")
     
     def set_parent_id(self, parent_id: str) -> None:
@@ -431,7 +432,7 @@ class BaseAgent(ABC):
             # 如果在等待状态，恢复执行
             if self._state.is_waiting_for_input():
                 self._state.resume_from_waiting()
-                agent_registry.update_agent_status(self._agent_id, "running")
+                get_agent_registry().update_agent_status(self._agent_id, "running")
         
         return messages
     
@@ -472,12 +473,12 @@ class BaseAgent(ABC):
     def on_start(self) -> None:
         """Agent开始执行时调用"""
         self._state.start()
-        agent_registry.update_agent_status(self._agent_id, "running")
+        get_agent_registry().update_agent_status(self._agent_id, "running")
     
     def on_complete(self, result: Dict[str, Any]) -> None:
         """Agent完成时调用"""
         self._state.set_completed(result)
-        agent_registry.update_agent_status(self._agent_id, "completed", result)
+        get_agent_registry().update_agent_status(self._agent_id, "completed", result)
         
         # 向父Agent报告完成
         if self.parent_id:
@@ -492,7 +493,7 @@ class BaseAgent(ABC):
     def on_error(self, error: str) -> None:
         """Agent出错时调用"""
         self._state.set_failed(error)
-        agent_registry.update_agent_status(self._agent_id, "failed", {"error": error})
+        get_agent_registry().update_agent_status(self._agent_id, "failed", {"error": error})
     
     @abstractmethod
     async def run(self, input_data: Dict[str, Any]) -> AgentResult:

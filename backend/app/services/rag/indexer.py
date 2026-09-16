@@ -194,6 +194,42 @@ class VectorStore:
         raise NotImplementedError
 
 
+# ============ Chroma client 复用与初始化互斥（并发审计保护） ============
+#
+# 多个审计任务并发时共享同一个 persist_directory（底层是 SQLite），
+# 各自 new 一个 PersistentClient 会产生初始化竞态（建表 / 迁移冲突）。
+# 这里按 persist_directory 复用 client 实例，并用一把锁串行化
+# 「建 client + list/get/create collection」这段临界区；
+# 向量读写（add / upsert / query）不经过该锁，保持并发。
+
+_client_cache: Dict[str, Any] = {}
+_init_lock = asyncio.Lock()
+
+
+def _get_shared_client(persist_directory: Optional[str]) -> Any:
+    """获取（或创建）指定持久化目录的 Chroma client，按目录复用实例
+
+    必须在 `_init_lock` 保护下调用。
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    cache_key = persist_directory or "__ephemeral__"
+    client = _client_cache.get(cache_key)
+    if client is None:
+        if persist_directory:
+            client = chromadb.PersistentClient(
+                path=persist_directory,
+                settings=Settings(anonymized_telemetry=False),
+            )
+        else:
+            client = chromadb.Client(
+                settings=Settings(anonymized_telemetry=False),
+            )
+        _client_cache[cache_key] = client
+    return client
+
+
 class ChromaVectorStore(VectorStore):
     """
     Chroma 向量存储
@@ -225,58 +261,50 @@ class ChromaVectorStore(VectorStore):
             force_recreate: 是否强制重建 collection
         """
         try:
-            import chromadb
-            from chromadb.config import Settings
+            # 🔥 并发保护：「建 client + 取/建 collection」必须串行，
+            # 否则多个审计任务同时初始化共享的 SQLite 目录会产生竞态
+            async with _init_lock:
+                self._client = _get_shared_client(self.persist_directory)
 
-            if self.persist_directory:
-                self._client = chromadb.PersistentClient(
-                    path=self.persist_directory,
-                    settings=Settings(anonymized_telemetry=False),
-                )
-            else:
-                self._client = chromadb.Client(
-                    settings=Settings(anonymized_telemetry=False),
-                )
+                # 检查 collection 是否存在
+                existing_collections = [c.name for c in self._client.list_collections()]
+                collection_exists = self.collection_name in existing_collections
 
-            # 检查 collection 是否存在
-            existing_collections = [c.name for c in self._client.list_collections()]
-            collection_exists = self.collection_name in existing_collections
+                # 如果需要强制重建，先删除
+                if force_recreate and collection_exists:
+                    logger.info(f"🗑️ 强制重建: 删除旧 collection '{self.collection_name}'")
+                    self._client.delete_collection(name=self.collection_name)
+                    collection_exists = False
 
-            # 如果需要强制重建，先删除
-            if force_recreate and collection_exists:
-                logger.info(f"🗑️ 强制重建: 删除旧 collection '{self.collection_name}'")
-                self._client.delete_collection(name=self.collection_name)
-                collection_exists = False
+                # 构建 collection 元数据
+                current_time = time.time()
+                collection_metadata = {
+                    "hnsw:space": "cosine",
+                    "index_version": INDEX_VERSION,
+                }
 
-            # 构建 collection 元数据
-            current_time = time.time()
-            collection_metadata = {
-                "hnsw:space": "cosine",
-                "index_version": INDEX_VERSION,
-            }
+                if self.embedding_config:
+                    collection_metadata["embedding_provider"] = self.embedding_config.get("provider", "openai")
+                    collection_metadata["embedding_model"] = self.embedding_config.get("model", "text-embedding-3-small")
+                    collection_metadata["embedding_dimension"] = self.embedding_config.get("dimension", 1536)
+                    if self.embedding_config.get("base_url"):
+                        collection_metadata["embedding_base_url"] = self.embedding_config.get("base_url")
 
-            if self.embedding_config:
-                collection_metadata["embedding_provider"] = self.embedding_config.get("provider", "openai")
-                collection_metadata["embedding_model"] = self.embedding_config.get("model", "text-embedding-3-small")
-                collection_metadata["embedding_dimension"] = self.embedding_config.get("dimension", 1536)
-                if self.embedding_config.get("base_url"):
-                    collection_metadata["embedding_base_url"] = self.embedding_config.get("base_url")
-
-            if collection_exists:
-                # 获取现有 collection
-                self._collection = self._client.get_collection(name=self.collection_name)
-                self._is_new_collection = False
-                logger.info(f"📂 获取现有 collection '{self.collection_name}'")
-            else:
-                # 创建新 collection
-                collection_metadata["created_at"] = current_time
-                collection_metadata["updated_at"] = current_time
-                self._collection = self._client.create_collection(
-                    name=self.collection_name,
-                    metadata=collection_metadata,
-                )
-                self._is_new_collection = True
-                logger.info(f"✨ 创建新 collection '{self.collection_name}'")
+                if collection_exists:
+                    # 获取现有 collection
+                    self._collection = self._client.get_collection(name=self.collection_name)
+                    self._is_new_collection = False
+                    logger.info(f"📂 获取现有 collection '{self.collection_name}'")
+                else:
+                    # 创建新 collection
+                    collection_metadata["created_at"] = current_time
+                    collection_metadata["updated_at"] = current_time
+                    self._collection = self._client.create_collection(
+                        name=self.collection_name,
+                        metadata=collection_metadata,
+                    )
+                    self._is_new_collection = True
+                    logger.info(f"✨ 创建新 collection '{self.collection_name}'")
 
         except ImportError:
             raise ImportError("chromadb is required. Install with: pip install chromadb")

@@ -91,7 +91,25 @@ async def lifespan(app: FastAPI):
     logger.info("演示账户: demo@example.com / demo123")
     logger.info("=" * 50)
 
+    # 启动定时批量审计调度器
+    if settings.BATCH_AUDIT_ENABLED:
+        try:
+            from app.services.scheduler.scheduler import batch_audit_scheduler
+            await batch_audit_scheduler.start()
+        except Exception as e:
+            logger.error(f"定时批量审计调度器启动失败: {e}", exc_info=True)
+    else:
+        logger.info("定时批量审计调度器已禁用 (BATCH_AUDIT_ENABLED=false)")
+
     yield
+
+    # 停止定时批量审计调度器
+    if settings.BATCH_AUDIT_ENABLED:
+        try:
+            from app.services.scheduler.scheduler import batch_audit_scheduler
+            await batch_audit_scheduler.stop()
+        except Exception as e:
+            logger.warning(f"定时批量审计调度器停止异常: {e}")
 
     logger.info("DeepAudit 后端服务已关闭")
 

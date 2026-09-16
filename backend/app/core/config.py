@@ -134,6 +134,11 @@ class Settings(BaseSettings):
     AGENT_MAX_ITERATIONS: int = 50  # Agent 最大迭代次数
     AGENT_TOKEN_BUDGET: int = 100000  # Agent Token 预算
     AGENT_TIMEOUT_SECONDS: int = 1800  # Agent 超时时间（30分钟）
+    AGENT_TASK_TEMP_DIR: str = "/tmp/deepaudit"  # Agent 任务临时目录（按 task_id 分目录，任务结束自动清理）
+    # 全局 LLM 并发上限（整个进程所有审计任务共享），0 表示不限制。
+    # 定时批量审计下 N 个任务 × 每任务多个 Agent 会直打上游，不限流容易触发 429；
+    # 单个任务同时等 LLM 的 Agent 数远低于该值，因此默认限流不影响单任务场景。
+    AGENT_GLOBAL_LLM_CONCURRENCY: int = 10
     
     # 沙箱配置（必须）
     SANDBOX_IMAGE: str = "deepaudit/sandbox:latest"  # 沙箱 Docker 镜像
@@ -148,6 +153,21 @@ class Settings(BaseSettings):
     RAG_CHUNK_SIZE: int = 1500  # 代码块大小（Token）
     RAG_CHUNK_OVERLAP: int = 50  # 代码块重叠（Token）
     RAG_TOP_K: int = 10  # 检索返回数量
+
+    # 定时批量审计配置
+    BATCH_AUDIT_ENABLED: bool = True  # 是否启用调度器
+    BATCH_AUDIT_MAX_CONCURRENCY: int = 10  # 单批次允许的最大并发项目数
+    BATCH_AUDIT_TICK_SECONDS: int = 30  # 调度器轮询间隔（秒）
+    BATCH_AUDIT_SHUTDOWN_TIMEOUT: int = 25  # 停机时等待在跑批次收尾的上限（秒），须小于容器 stop_grace_period
+
+    # 数据库连接池
+    # ⚠️ 批量审计下每个 AgentTask 会全程独占一个连接（会话包住整个审计生命周期），
+    # 因此必须满足：BATCH_AUDIT_MAX_CONCURRENCY < (POOL_SIZE + MAX_OVERFLOW) / 2，
+    # 否则并发跑满时连接池耗尽，连登录/项目列表等普通接口也会一起挂死。
+    DB_POOL_SIZE: int = 20  # 常驻连接数
+    DB_MAX_OVERFLOW: int = 20  # 峰值可临时超出的连接数
+    DB_POOL_TIMEOUT: int = 60  # 等待可用连接的超时（秒）
+    DB_POOL_RECYCLE: int = 1800  # 连接回收周期（秒），避免拿到被 PG 侧断掉的死连接
 
     class Config:
         case_sensitive = True

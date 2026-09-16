@@ -3,6 +3,8 @@ LLM服务 - 代码分析核心服务
 支持中英文双语输出
 """
 
+import asyncio
+import contextlib
 import json
 import re
 import logging
@@ -19,6 +21,56 @@ except ImportError:
     JSON_REPAIR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+# ============ 全局 LLM 并发闸门 ============
+#
+# 批量审计场景下，多个任务 × 每任务多个子 Agent 会同时发起大量 LLM 请求，
+# 极易触发上游 429。这里提供进程级的并发上限：
+# settings.AGENT_GLOBAL_LLM_CONCURRENCY = 0 表示不限制（保持既有行为）。
+
+_global_llm_semaphore: Optional[asyncio.Semaphore] = None
+_global_llm_semaphore_limit: int = 0
+_global_llm_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_global_llm_semaphore() -> Optional[asyncio.Semaphore]:
+    """惰性创建全局 LLM 并发信号量
+
+    信号量绑定创建时的事件循环，若循环变更（如测试、热重载）则重建。
+    """
+    global _global_llm_semaphore, _global_llm_semaphore_limit, _global_llm_semaphore_loop
+
+    limit = settings.AGENT_GLOBAL_LLM_CONCURRENCY
+    if limit <= 0:
+        return None
+
+    try:
+        loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if (
+        _global_llm_semaphore is None
+        or _global_llm_semaphore_limit != limit
+        or (loop is not None and _global_llm_semaphore_loop is not loop)
+    ):
+        _global_llm_semaphore = asyncio.Semaphore(limit)
+        _global_llm_semaphore_limit = limit
+        _global_llm_semaphore_loop = loop
+
+    return _global_llm_semaphore
+
+
+@contextlib.asynccontextmanager
+async def _global_llm_slot():
+    """占用一个全局 LLM 并发额度；未启用限制时直接放行"""
+    sem = _get_global_llm_semaphore()
+    if sem is None:
+        yield
+        return
+    async with sem:
+        yield
 
 
 class LLMService:
@@ -458,7 +510,8 @@ Please analyze the following code:
         )
 
         adapter = LLMFactory.create_adapter(self.config)
-        response = await adapter.complete(request)
+        async with _global_llm_slot():
+            response = await adapter.complete(request)
 
         result = {
             "content": response.content,
@@ -509,7 +562,8 @@ Please analyze the following code:
         )
 
         adapter = LLMFactory.create_adapter(self.config)
-        response = await adapter.complete(request)
+        async with _global_llm_slot():
+            response = await adapter.complete(request)
 
         return {
             "content": response.content,
@@ -528,6 +582,40 @@ Please analyze the following code:
     ):
         """
         流式聊天完成接口，逐 token 返回
+
+        🔥 全程占用一个全局 LLM 并发额度，确保流式请求也受上限约束
+
+        Args:
+            messages: 消息列表
+            temperature: 温度参数（None 时使用用户配置）
+            max_tokens: 最大token数（None 时使用用户配置）
+
+        Yields:
+            dict: {"type": "token", "content": str} 或 {"type": "done", ...}
+        """
+        sem = _get_global_llm_semaphore()
+        if sem is None:
+            async for chunk in self._chat_completion_stream_impl(
+                messages, temperature=temperature, max_tokens=max_tokens
+            ):
+                yield chunk
+            return
+
+        # async with 在生成器被提前关闭（如客户端断连）时同样会释放额度
+        async with sem:
+            async for chunk in self._chat_completion_stream_impl(
+                messages, temperature=temperature, max_tokens=max_tokens
+            ):
+                yield chunk
+
+    async def _chat_completion_stream_impl(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """
+        流式聊天完成实现（不处理并发限额，由 chat_completion_stream 包裹）
 
         Args:
             messages: 消息列表

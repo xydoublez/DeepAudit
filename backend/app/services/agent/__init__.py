@@ -27,6 +27,8 @@ from .agents import (
 from .core import (
     AgentState, AgentStatus,
     AgentRegistry, agent_registry,
+    get_agent_registry, bind_task_registry, get_task_registry,
+    unbind_task_registry, list_active_task_registries,
     AgentMessage, MessageType, MessagePriority, MessageBus,
 )
 
@@ -70,6 +72,11 @@ __all__ = [
     "AgentStatus",
     "AgentRegistry",
     "agent_registry",
+    "get_agent_registry",
+    "bind_task_registry",
+    "get_task_registry",
+    "unbind_task_registry",
+    "list_active_task_registries",
     "AgentMessage",
     "MessageType",
     "MessagePriority",

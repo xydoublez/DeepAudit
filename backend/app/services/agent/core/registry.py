@@ -10,6 +10,7 @@ Agent 注册表和动态Agent树管理
 
 import logging
 import threading
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -305,5 +306,104 @@ class AgentRegistry:
             return len(finished_ids)
 
 
-# 全局注册表实例
+# 全局注册表实例（向后兼容：未绑定任务级注册表时的回退）
 agent_registry = AgentRegistry()
+
+
+# ============ 任务级注册表（支持多审计任务并发） ============
+#
+# 背景：Agent 注册表原本是进程级全局单例，多个审计任务并发执行时会互相
+# 清空/覆盖 Agent 树（clear()、单一 root_agent_id、stop_all_agents() 等），
+# 导致任务无法 finish、取消一个任务连带杀掉其他任务。
+#
+# 方案：每个审计任务绑定独立的 AgentRegistry 实例，通过 ContextVar 传播。
+# asyncio.create_task / asyncio.to_thread 都会复制当前 Context，因此子 Agent、
+# 工具调用、线程池内的阻塞操作都能自动继承本任务的注册表。
+
+_current_registry: ContextVar[Optional[AgentRegistry]] = ContextVar(
+    "deepaudit_agent_registry", default=None
+)
+
+# 审计任务 ID -> 该任务专属注册表（供 API 层按 task_id 定位，如取消/查询 Agent 树）
+_task_registries: Dict[str, AgentRegistry] = {}
+_registries_lock = threading.RLock()
+
+
+def get_agent_registry() -> AgentRegistry:
+    """获取当前执行上下文的 Agent 注册表
+
+    未绑定任务级注册表时回退到全局单例，保证既有单任务行为不变。
+    """
+    registry = _current_registry.get()
+    if registry is None:
+        return agent_registry
+    return registry
+
+
+def bind_task_registry(audit_task_id: str) -> AgentRegistry:
+    """为审计任务创建并绑定独立注册表
+
+    必须在任务协程的最开始调用（此时 ContextVar 的设置会被后续创建的
+    所有子任务继承）。
+
+    Args:
+        audit_task_id: 审计任务 ID（AgentTask.id）
+
+    Returns:
+        该任务专属的注册表实例
+    """
+    registry = AgentRegistry()
+
+    with _registries_lock:
+        old = _task_registries.get(audit_task_id)
+        _task_registries[audit_task_id] = registry
+
+    _current_registry.set(registry)
+
+    if old is not None:
+        logger.warning(
+            f"[AgentRegistry] Task {audit_task_id} rebound a new registry, "
+            f"discarding {len(old.get_agent_tree()['nodes'])} old nodes"
+        )
+
+    logger.debug(f"[AgentRegistry] Bound task registry for {audit_task_id}")
+    return registry
+
+
+def get_task_registry(audit_task_id: str) -> Optional[AgentRegistry]:
+    """按审计任务 ID 获取注册表（供 API 层使用，不依赖调用上下文）"""
+    with _registries_lock:
+        return _task_registries.get(audit_task_id)
+
+
+def unbind_task_registry(audit_task_id: str) -> None:
+    """解绑并销毁审计任务的注册表（任务结束时调用）"""
+    with _registries_lock:
+        registry = _task_registries.pop(audit_task_id, None)
+
+    if registry is not None:
+        registry.clear()
+
+    # 仅当当前上下文绑定的正是该任务的注册表时才重置，
+    # 避免误清其他任务在同一上下文中设置的值
+    if _current_registry.get() is registry:
+        _current_registry.set(None)
+
+    logger.debug(f"[AgentRegistry] Unbound task registry for {audit_task_id}")
+
+
+def list_active_task_registries() -> List[str]:
+    """列出当前绑定了注册表的审计任务 ID（用于监控/调试）"""
+    with _registries_lock:
+        return list(_task_registries.keys())
+
+
+__all__ = [
+    "AgentRegistry",
+    "agent_registry",
+    "get_agent_registry",
+    "bind_task_registry",
+    "get_task_registry",
+    "unbind_task_registry",
+    "list_active_task_registries",
+]

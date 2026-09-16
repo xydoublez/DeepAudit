@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 from .base import AgentTool, ToolResult
-from ..core.registry import agent_registry
+from ..core.registry import get_agent_registry
 from ..core.message import message_bus, MessageType, MessagePriority
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class CreateSubAgentTool(AgentTool):
         if self._sub_executor is None and self.llm_service:
             from ..core.executor import SubAgentExecutor
             # 需要获取父Agent实例
-            parent_agent = agent_registry.get_agent(self.parent_agent_id)
+            parent_agent = get_agent_registry().get_agent(self.parent_agent_id)
             if parent_agent:
                 self._sub_executor = SubAgentExecutor(
                     parent_agent=parent_agent,
@@ -157,7 +157,7 @@ class CreateSubAgentTool(AgentTool):
         agent_id = _generate_agent_id()
         
         # 注册到注册表
-        node = agent_registry.register_agent(
+        node = get_agent_registry().register_agent(
             agent_id=agent_id,
             agent_name=name.strip(),
             agent_type=agent_type,
@@ -189,9 +189,9 @@ class CreateSubAgentTool(AgentTool):
                 
                 # 更新注册表状态
                 if exec_result.get("success"):
-                    agent_registry.update_agent_status(agent_id, "completed", exec_result)
+                    get_agent_registry().update_agent_status(agent_id, "completed", exec_result)
                 else:
-                    agent_registry.update_agent_status(agent_id, "failed", {"error": exec_result.get("error")})
+                    get_agent_registry().update_agent_status(agent_id, "failed", {"error": exec_result.get("error")})
                 
                 return ToolResult(
                     success=exec_result.get("success", False),
@@ -291,7 +291,7 @@ class SendMessageTool(AgentTool):
             return ToolResult(success=False, error="消息内容不能为空")
         
         # 检查目标Agent是否存在
-        target_node = agent_registry.get_agent_node(target_agent_id)
+        target_node = get_agent_registry().get_agent_node(target_agent_id)
         if not target_node:
             return ToolResult(
                 success=False,
@@ -364,8 +364,9 @@ class ViewAgentGraphTool(AgentTool):
     async def _execute(self, **kwargs) -> ToolResult:
         """查看Agent图"""
         
-        tree_view = agent_registry.get_agent_tree_view()
-        stats = agent_registry.get_statistics()
+        registry = get_agent_registry()
+        tree_view = registry.get_agent_tree_view()
+        stats = registry.get_statistics()
         
         return ToolResult(
             success=True,
@@ -421,7 +422,7 @@ class WaitForMessageTool(AgentTool):
             self.agent_state.enter_waiting_state(reason)
         
         # 更新注册表
-        agent_registry.update_agent_status(self.agent_id, "waiting")
+        get_agent_registry().update_agent_status(self.agent_id, "waiting")
         
         return ToolResult(
             success=True,
@@ -489,7 +490,7 @@ class AgentFinishTool(AgentTool):
         """完成Agent任务"""
         
         # 获取父Agent ID
-        parent_id = agent_registry.get_parent(self.agent_id)
+        parent_id = get_agent_registry().get_parent(self.agent_id)
         
         if not parent_id:
             return ToolResult(
@@ -505,7 +506,7 @@ class AgentFinishTool(AgentTool):
             "recommendations": recommendations or [],
         }
         
-        agent_registry.update_agent_status(
+        get_agent_registry().update_agent_status(
             self.agent_id,
             "completed" if success else "failed",
             result,
@@ -523,7 +524,7 @@ class AgentFinishTool(AgentTool):
             success=success,
         )
         
-        agent_node = agent_registry.get_agent_node(self.agent_id)
+        agent_node = get_agent_registry().get_agent_node(self.agent_id)
         
         return ToolResult(
             success=True,
@@ -600,7 +601,7 @@ class RunSubAgentsTool(AgentTool):
         # 验证所有Agent存在且是当前Agent的子Agent
         valid_agents = []
         for aid in agent_ids:
-            node = agent_registry.get_agent_node(aid)
+            node = get_agent_registry().get_agent_node(aid)
             if not node:
                 continue
             if node.get("parent_id") != self.parent_agent_id:
@@ -723,7 +724,7 @@ class CollectSubAgentResultsTool(AgentTool):
         """收集子Agent结果"""
         
         # 获取所有子Agent
-        children = agent_registry.get_children(self.parent_agent_id)
+        children = get_agent_registry().get_children(self.parent_agent_id)
         
         if not children:
             return ToolResult(
@@ -743,7 +744,7 @@ class CollectSubAgentResultsTool(AgentTool):
         child_summaries = []
         
         for child_id in children:
-            node = agent_registry.get_agent_node(child_id)
+            node = get_agent_registry().get_agent_node(child_id)
             if not node:
                 continue
             

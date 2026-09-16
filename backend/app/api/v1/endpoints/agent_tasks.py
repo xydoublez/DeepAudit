@@ -235,7 +235,134 @@ def is_task_cancelled(task_id: str) -> bool:
     return task_id in _cancelled_tasks
 
 
+def request_agent_task_cancellation(task_id: str) -> None:
+    """请求取消指定的 Agent 任务
+
+    不包含权限校验与任务状态落库，供 cancel 接口与批量审计取消复用。
+    """
+    # 🔥 0. 立即标记任务为已取消（用于前置操作的取消检查）
+    _cancelled_tasks.add(task_id)
+    logger.info(f"[Cancel] Added task {task_id} to cancelled set")
+
+    # 🔥 1. 设置 Agent 的取消标志
+    runner = _running_tasks.get(task_id)
+    if runner:
+        runner.cancel()
+        logger.info(f"[Cancel] Set cancel flag for task {task_id}")
+
+    # 🔥 2. 通过任务级注册表取消该任务的所有子 Agent
+    # 只操作本任务的 registry，避免并发时误杀其他审计任务的 Agent
+    from app.services.agent.core import get_task_registry
+    from app.services.agent.core.graph_controller import stop_all_agents
+    try:
+        task_registry = get_task_registry(task_id)
+        if task_registry is not None:
+            stop_result = stop_all_agents(exclude_root=False, registry=task_registry)
+            logger.info(f"[Cancel] Stopped all agents: {stop_result}")
+        else:
+            logger.info(f"[Cancel] No active registry for task {task_id}, skip stopping agents")
+    except Exception as e:
+        logger.warning(f"[Cancel] Failed to stop agents via registry: {e}")
+
+    # 🔥 3. 强制取消 asyncio Task（立即中断 LLM 调用）
+    asyncio_task = _running_asyncio_tasks.get(task_id)
+    if asyncio_task and not asyncio_task.done():
+        asyncio_task.cancel()
+        logger.info(f"[Cancel] Cancelled asyncio task for {task_id}")
+
+
+async def _release_task_resources(task_id: str) -> None:
+    """释放任务级资源（幂等，可安全重复调用）
+
+    从 `_execute_agent_task_inner` 的 finally 中提取出来，使外层薄包装也能调用。
+    """
+    from app.core.config import settings
+    from app.services.agent.core import get_task_registry, unbind_task_registry
+    from app.services.agent.core.graph_controller import agent_graph_controller
+
+    # 🔥 先清理 Agent 图与本任务的消息队列，必须在解绑注册表之前：
+    # message_bus 是模块级全局单例，解绑后就再也拿不到本任务的 agent 树，
+    # 那些队列会永久残留（批量审计上千个任务会持续吃内存）
+    try:
+        task_registry = get_task_registry(task_id)
+        if task_registry is not None:
+            agent_graph_controller.cleanup(registry=task_registry)
+    except Exception as graph_error:
+        logger.warning(f"Failed to cleanup agent graph for task {task_id}: {graph_error}")
+
+    _running_orchestrators.pop(task_id, None)
+    _running_tasks.pop(task_id, None)
+    _running_event_managers.pop(task_id, None)
+    _running_asyncio_tasks.pop(task_id, None)  # 🔥 清理 asyncio task
+    _cancelled_tasks.discard(task_id)  # 🔥 清理取消标志
+
+    # 🔥 解绑并清理本任务的 Agent 注册表（不影响其他并发任务）
+    try:
+        unbind_task_registry(task_id)
+    except Exception as unbind_error:
+        logger.warning(f"Failed to unbind agent registry for task {task_id}: {unbind_error}")
+
+    # 🔥 清理本任务的临时目录（克隆的仓库 / 解压的 ZIP），避免批量审计撑爆磁盘
+    try:
+        shutil.rmtree(
+            f"{settings.AGENT_TASK_TEMP_DIR.rstrip('/')}/{task_id}",
+            ignore_errors=True,
+        )
+    except Exception as cleanup_error:
+        logger.warning(f"Failed to cleanup temp dir for task {task_id}: {cleanup_error}")
+
+
+async def _mark_task_terminal_if_pending(
+    task_id: str,
+    status: AgentTaskStatus,
+    error_message: Optional[str] = None,
+) -> None:
+    """把仍停在 PENDING/RUNNING 的任务标记为终态（兜底用，吞掉自身异常）
+
+    仅在内层 handler 没机会执行时生效；已是终态的任务不会被覆盖。
+    """
+    try:
+        async with async_session_factory() as db:
+            task = await db.get(AgentTask, task_id)
+            if not task:
+                return
+            if task.status not in (AgentTaskStatus.PENDING, AgentTaskStatus.RUNNING):
+                return
+            task.status = status
+            if error_message:
+                task.error_message = error_message[:1000]
+            task.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to mark task {task_id} as {status}: {e}")
+
+
 async def _execute_agent_task(task_id: str):
+    """在后台执行 Agent 任务（对外入口）
+
+    薄包装，只负责兜底；真正的实现在 `_execute_agent_task_inner`。
+
+    内层函数的 `bind_task_registry` 与其 try/finally 之间夹着两个可取消的
+    await 点（Docker 沙箱初始化、获取数据库连接）。取消信号落在那里时，
+    内层 finally 完全不会执行 —— 注册表 / 事件管理器 / 克隆下来的仓库目录
+    全部泄漏，任务还会永久停在 PENDING。批量审计取消一次会同时中断多个
+    在跑任务，命中该窗口的概率不低，因此在外层补一道幂等兜底。
+    """
+    try:
+        await _execute_agent_task_inner(task_id)
+    except asyncio.CancelledError:
+        await _mark_task_terminal_if_pending(task_id, AgentTaskStatus.CANCELLED)
+        raise
+    except Exception as e:
+        logger.error(f"Task {task_id} failed before entering main block: {e}", exc_info=True)
+        await _mark_task_terminal_if_pending(
+            task_id, AgentTaskStatus.FAILED, error_message=str(e)
+        )
+    finally:
+        await _release_task_resources(task_id)
+
+
+async def _execute_agent_task_inner(task_id: str):
     """
     在后台执行 Agent 任务 - 使用动态 Agent 树架构
     
@@ -244,11 +371,16 @@ async def _execute_agent_task(task_id: str):
     from app.services.agent.agents import OrchestratorAgent, ReconAgent, AnalysisAgent, VerificationAgent
     from app.services.agent.event_manager import EventManager, AgentEventEmitter
     from app.services.llm.service import LLMService
-    from app.services.agent.core import agent_registry
+    from app.services.agent.core import bind_task_registry
     from app.services.agent.tools import SandboxManager
     from app.core.config import settings
     import time
-    
+
+    # 🔥 为本审计任务绑定独立的 Agent 注册表（多任务并发执行的前提）
+    # asyncio.create_task / asyncio.to_thread 都会复制当前 Context，
+    # 因此后续创建的子 Agent、工具调用、线程池操作都自动继承该注册表
+    bind_task_registry(task_id)
+
     # 🔥 在任务最开始就初始化 Docker 沙箱管理器
     # 这样可以确保整个任务生命周期内使用同一个管理器，并且尽早发现 Docker 问题
     logger.info(f"🚀 Starting execution for task {task_id}")
@@ -463,11 +595,7 @@ async def _execute_agent_task(task_id: str):
             _running_tasks[task_id] = orchestrator  # 兼容旧的取消逻辑
             _running_event_managers[task_id] = event_manager  # 用于 SSE 流
             
-            # 🔥 清理旧的 Agent 注册表，避免显示多个树
-            from app.services.agent.core import agent_registry
-            agent_registry.clear()
-            
-            # 注册 Orchestrator 到 Agent Registry（使用其内置方法）
+            # 注册 Orchestrator 到本任务的 Agent Registry（使用其内置方法）
             orchestrator._register_to_registry(task="Root orchestrator for security audit")
             
             await event_emitter.emit_info("🧠 动态 Agent 树架构启动")
@@ -656,15 +784,8 @@ async def _execute_agent_task(task_id: str):
             except Exception as save_error:
                 logger.error(f"Failed to save agent tree: {save_error}")
 
-            # 清理
-            _running_orchestrators.pop(task_id, None)
-            _running_tasks.pop(task_id, None)
-            _running_event_managers.pop(task_id, None)
-            _running_asyncio_tasks.pop(task_id, None)  # 🔥 清理 asyncio task
-            _cancelled_tasks.discard(task_id)  # 🔥 清理取消标志
-
-            # 🔥 清理整个 Agent 注册表（包括所有子 Agent）
-            agent_registry.clear()
+            # 清理（幂等；外层包装的 finally 会再兜底一次）
+            await _release_task_resources(task_id)
 
             logger.debug(f"Task {task_id} cleaned up")
 
@@ -1446,10 +1567,12 @@ async def _save_agent_tree(db: AsyncSession, task_id: str) -> None:
     🔥 在任务完成前调用，将内存中的 Agent 树持久化到数据库
     """
     from app.models.agent_task import AgentTreeNode
-    from app.services.agent.core import agent_registry
+    from app.services.agent.core import get_task_registry, get_agent_registry
 
     try:
-        tree = agent_registry.get_agent_tree()
+        # 🔥 按任务 ID 定位注册表，避免并发时读取到其他任务的 Agent 树
+        registry = get_task_registry(task_id) or get_agent_registry()
+        tree = registry.get_agent_tree()
         nodes = tree.get("nodes", {})
 
         if not nodes:
@@ -1476,7 +1599,7 @@ async def _save_agent_tree(db: AsyncSession, task_id: str) -> None:
         saved_count = 0
         for agent_id, node_data in nodes.items():
             # 获取 Agent 实例的统计数据
-            agent_instance = agent_registry.get_agent(agent_id)
+            agent_instance = registry.get_agent(agent_id)
             iterations = 0
             tool_calls = 0
             tokens_used = 0
@@ -1735,31 +1858,8 @@ async def cancel_agent_task(
     if task.status in [AgentTaskStatus.COMPLETED, AgentTaskStatus.FAILED, AgentTaskStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="任务已结束，无法取消")
 
-    # 🔥 0. 立即标记任务为已取消（用于前置操作的取消检查）
-    _cancelled_tasks.add(task_id)
-    logger.info(f"[Cancel] Added task {task_id} to cancelled set")
-
-    # 🔥 1. 设置 Agent 的取消标志
-    runner = _running_tasks.get(task_id)
-    if runner:
-        runner.cancel()
-        logger.info(f"[Cancel] Set cancel flag for task {task_id}")
-
-    # 🔥 2. 通过 agent_registry 取消所有子 Agent
-    from app.services.agent.core import agent_registry
-    from app.services.agent.core.graph_controller import stop_all_agents
-    try:
-        # 停止所有 Agent（包括子 Agent）
-        stop_result = stop_all_agents(exclude_root=False)
-        logger.info(f"[Cancel] Stopped all agents: {stop_result}")
-    except Exception as e:
-        logger.warning(f"[Cancel] Failed to stop agents via registry: {e}")
-
-    # 🔥 3. 强制取消 asyncio Task（立即中断 LLM 调用）
-    asyncio_task = _running_asyncio_tasks.get(task_id)
-    if asyncio_task and not asyncio_task.done():
-        asyncio_task.cancel()
-        logger.info(f"[Cancel] Cancelled asyncio task for {task_id}")
+    # 🔥 执行取消（标记 + 停 Agent + 中断 asyncio Task）
+    request_agent_task_cancellation(task_id)
 
     # 更新状态
     task.status = AgentTaskStatus.CANCELLED
@@ -2404,6 +2504,7 @@ async def _get_project_root(
     import subprocess
     import shutil
     from urllib.parse import urlparse, urlunparse
+    from app.core.config import settings
 
     # 辅助函数：发送事件
     async def emit(message: str, level: str = "info"):
@@ -2420,7 +2521,7 @@ async def _get_project_root(
         if is_task_cancelled(task_id):
             raise asyncio.CancelledError("任务已取消")
 
-    base_path = f"/tmp/deepaudit/{task_id}"
+    base_path = f"{settings.AGENT_TASK_TEMP_DIR.rstrip('/')}/{task_id}"
 
     # 确保目录存在且为空
     if os.path.exists(base_path):
@@ -2916,10 +3017,13 @@ async def get_agent_tree(
     logger.debug(f"[AgentTree API] task_id={task_id}, runner exists={runner is not None}")
     
     if runner:
-        from app.services.agent.core import agent_registry
-        
-        tree = agent_registry.get_agent_tree()
-        stats = agent_registry.get_statistics()
+        from app.services.agent.core import get_task_registry, get_agent_registry
+
+        # 🔥 按任务 ID 定位注册表，避免并发时读取到其他任务的 Agent 树
+        registry = get_task_registry(task_id) or get_agent_registry()
+
+        tree = registry.get_agent_tree()
+        stats = registry.get_statistics()
         logger.debug(f"[AgentTree API] tree nodes={len(tree.get('nodes', {}))}, root={tree.get('root_agent_id')}")
         logger.debug(f"[AgentTree API] 节点详情: {list(tree.get('nodes', {}).keys())}")
         
@@ -2935,7 +3039,7 @@ async def get_agent_tree(
             tokens_used = 0
             findings_count = 0
             
-            agent_instance = agent_registry.get_agent(agent_id)
+            agent_instance = registry.get_agent(agent_id)
             if agent_instance and hasattr(agent_instance, 'get_stats'):
                 agent_stats = agent_instance.get_stats()
                 iterations = agent_stats.get("iterations", 0)

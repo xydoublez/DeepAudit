@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 from .base import AgentTool, ToolResult
-from ..core.registry import agent_registry
+from ..core.registry import get_agent_registry
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ class FinishScanTool(AgentTool):
         if self.agent_state:
             self.agent_state.set_completed(final_result)
         
-        agent_registry.update_agent_status(
+        get_agent_registry().update_agent_status(
             self.agent_id,
             "completed" if success else "failed",
             final_result,
@@ -134,7 +134,7 @@ class FinishScanTool(AgentTool):
                 logger.warning(f"Failed to update tracer: {e}")
         
         # 获取统计信息
-        stats = agent_registry.get_statistics()
+        stats = get_agent_registry().get_statistics()
         
         return ToolResult(
             success=True,
@@ -150,8 +150,10 @@ class FinishScanTool(AgentTool):
     
     def _validate_root_agent(self) -> Optional[ToolResult]:
         """验证是否为根Agent"""
+        registry = get_agent_registry()
+
         # 检查是否有父Agent
-        parent_id = agent_registry.get_parent(self.agent_id)
+        parent_id = registry.get_parent(self.agent_id)
         
         if parent_id is not None:
             return ToolResult(
@@ -160,7 +162,7 @@ class FinishScanTool(AgentTool):
             )
         
         # 检查是否为注册的根Agent
-        root_id = agent_registry.get_root_agent_id()
+        root_id = registry.get_root_agent_id()
         if root_id and root_id != self.agent_id:
             return ToolResult(
                 success=False,
@@ -172,7 +174,7 @@ class FinishScanTool(AgentTool):
     def _check_active_agents(self) -> Optional[ToolResult]:
         """检查是否有活跃的子Agent"""
         try:
-            tree = agent_registry.get_agent_tree()
+            tree = get_agent_registry().get_agent_tree()
             
             running_agents = []
             waiting_agents = []
@@ -245,7 +247,7 @@ class FinishScanTool(AgentTool):
         all_findings = []
         
         try:
-            tree = agent_registry.get_agent_tree()
+            tree = get_agent_registry().get_agent_tree()
             
             for agent_id, node in tree["nodes"].items():
                 result = node.get("result")
