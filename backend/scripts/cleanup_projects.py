@@ -177,7 +177,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="最多处理 N 个（0 表示不限制）")
     parser.add_argument("--dry-run", action="store_true", help="仅预览将清理的项目，不执行删除")
     parser.add_argument("--backup-file", default="",
-                        help="备份清单输出路径（默认 scripts/cleanup_backup_<时间戳>.csv）")
+                        help="备份清单输出路径（默认 scripts/local_data/cleanup_backup_<时间戳>.csv）")
     parser.add_argument("--use-proxy", action="store_true",
                         help="信任系统代理环境变量（默认绕过代理直连内网）")
     parser.add_argument("--timeout", type=int, default=30, help="请求超时秒数（默认 30）")
@@ -224,8 +224,11 @@ def main() -> int:
         return 0
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    here = os.path.dirname(os.path.abspath(__file__))
-    backup_path = args.backup_file or os.path.join(here, f"cleanup_backup_{ts}.csv")
+    # 备份清单含内网仓库地址与项目名，统一写到已被 .gitignore 忽略的数据目录，
+    # 避免一次 git add . 就把内部资产清单写进版本库
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_data")
+    os.makedirs(out_dir, exist_ok=True)
+    backup_path = args.backup_file or os.path.join(out_dir, f"cleanup_backup_{ts}.csv")
     if args.permanent:
         write_csv(backup_path, targets, REPORT_FIELDS)
         print(f"[*] 已导出删除前备份清单: {backup_path}")
@@ -254,7 +257,7 @@ def main() -> int:
     elapsed = time.time() - t0
     print(f"[✓] 清理完成: 成功 {stats['deleted']} | 失败 {stats['failed']} | 耗时 {elapsed:.1f}s")
     if failures:
-        fail_path = os.path.join(here, f"cleanup_failures_{ts}.csv")
+        fail_path = os.path.join(out_dir, f"cleanup_failures_{ts}.csv")
         write_csv(fail_path, failures, ["id", "name", "repository_url", "error"])
         print(f"[!] 失败明细已写入: {fail_path}")
     return 0 if stats["failed"] == 0 else 1

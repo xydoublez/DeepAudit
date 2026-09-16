@@ -195,3 +195,9 @@ backend/data/vector_db/
 frontend/public/project_import_data.csv
 backend/scripts/*_report.csv
 backend/scripts/cleanup_backup_*.csv
+
+# 本地数据目录：GitLab 导出清单、清理备份等，含内网仓库地址与负责人姓名。
+# import_gitlab_projects.py / cleanup_projects.py 的默认输出已改到此目录。
+# ⚠️ 这类文件绝不能放到 frontend/public：Vite 会原样拷进 dist，
+# 而 dist 由 nginx 无鉴权提供，等于把内部代码资产地图对外公开。
+backend/scripts/local_data/

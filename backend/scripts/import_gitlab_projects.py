@@ -3,9 +3,11 @@
 从 GitLab 拉取项目清单，输出为 DeepAudit「CSV 批量导入」模板格式的真实数据文件
 
 功能:
-  1. 通过 GitLab REST API (v4) 分页拉取项目清单（默认 https://gitlab.msunhis.com/api/v4）
+  1. 通过 GitLab REST API (v4) 分页拉取项目清单
+     （地址必填：环境变量 GITLAB_API_URL 或 --gitlab-url，形如 https://<host>/api/v4）
   2. 项目描述包含「项目名称 + 负责人」；负责人取项目 owner 成员（含组继承），
-     排除 --exclude-owners 指定用户名（默认 litao,lizhiqiang,xydoublez），
+     排除 --exclude-owners 指定用户名（默认取环境变量 GITLAB_EXCLUDE_OWNERS，
+     逗号分隔；本文件已被 git 跟踪，不得把真实内部账号写死在默认值里），
      无 owner 时回退 maintainer 成员，仍无则回退群组/命名空间名
   3. 技术栈默认填充 --languages 指定语言（默认 java,javascript,typescript）
   4. 输出 CSV 字段与批量导入模板完全一致（UTF-8 BOM，Excel 可直接打开）:
@@ -14,16 +16,20 @@
 
 用法:
   cd backend
+  export GITLAB_API_URL=https://<your-gitlab-host>/api/v4   # 必需
   export sfx_git_token=<GitLab-PAT>          # 优先使用（PRIVATE-TOKEN 认证）
+  export GITLAB_EXCLUDE_OWNERS=<user1,user2> # 可选：计算负责人时排除的账号
   .venv/bin/python scripts/import_gitlab_projects.py --dry-run       # 预览前 10 个项目
-  .venv/bin/python scripts/import_gitlab_projects.py                 # 全量导出到 frontend/public + dist
+  .venv/bin/python scripts/import_gitlab_projects.py                 # 全量导出到 scripts/local_data
   .venv/bin/python scripts/import_gitlab_projects.py --limit 50      # 只导出前 50 个
   .venv/bin/python scripts/import_gitlab_projects.py --output /tmp/projects.csv   # 自定义输出路径
 
 输出（默认）:
-  frontend/public/project_import_data.csv   # 源码目录（vite build 时复制到 dist）
-  frontend/dist/project_import_data.csv     # 当前部署可直接下载
-  下载地址: http://localhost:5173/project_import_data.csv
+  backend/scripts/local_data/project_import_data.csv   # 已被 .gitignore 忽略
+
+⚠️ 切勿把导出结果放到 frontend/public 或 frontend/dist：Vite 会把 public 下的
+文件原样拷进 dist，而 dist 由 nginx 无鉴权提供，等于把内网仓库清单与
+负责人姓名对外公开（任何人 GET /project_import_data.csv 即可下载）。
 
 认证:
   GitLab: sfx_git_token / --gitlab-token (PAT)  >  ~/.git-credentials 同主机 Basic 认证
@@ -48,7 +54,9 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("缺少 requests 库，请使用 backend/.venv/bin/python 运行本脚本")
 
-DEFAULT_GITLAB_URL = "https://gitlab.msunhis.com/api/v4"
+# 内网 GitLab 地址不得写死在仓库里：本文件已被 git 跟踪，硬编码域名等于把
+# 内部主机名公开到版本历史。通过环境变量 GITLAB_API_URL 或 --gitlab-url 提供。
+DEFAULT_GITLAB_URL = ""
 DEFAULT_LANGUAGES = ["java", "javascript", "typescript"]
 OUTPUT_FILENAME = "project_import_data.csv"
 
@@ -117,14 +125,15 @@ def fetch_all_pages(session: requests.Session, url: str, params: dict,
 
 
 def default_outputs() -> list:
-    """默认输出: frontend/public（源码目录）+ frontend/dist（部署可直接下载）"""
+    """默认输出: backend/scripts/local_data（已被 .gitignore 忽略的数据目录）
+
+    ⚠️ 不得写入 frontend/public 或 frontend/dist：那里的文件会被 nginx 无鉴权
+    对外提供，导出的内网仓库清单与负责人姓名将可被任意下载。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
-    fe = os.path.normpath(os.path.join(here, "..", "..", "frontend"))
-    outputs = [os.path.join(fe, "public", OUTPUT_FILENAME)]
-    dist_file = os.path.join(fe, "dist", OUTPUT_FILENAME)
-    if os.path.isdir(os.path.dirname(dist_file)):
-        outputs.append(dist_file)
-    return outputs
+    out_dir = os.path.join(here, "local_data")
+    os.makedirs(out_dir, exist_ok=True)
+    return [os.path.join(out_dir, OUTPUT_FILENAME)]
 
 
 def write_csv(path: str, rows: list) -> None:
@@ -319,20 +328,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="仅预览将要导出的项目，不写文件")
     parser.add_argument("--limit", type=int, default=0, help="最多导出 N 个项目（0=不限制）")
-    parser.add_argument("--exclude-owners", default="litao,lizhiqiang,xydoublez",
-                        help="计算负责人时排除的 GitLab 用户名（逗号分隔）")
+    parser.add_argument("--exclude-owners", default=os.environ.get("GITLAB_EXCLUDE_OWNERS", ""),
+                        help="计算负责人时排除的 GitLab 用户名（逗号分隔，默认取环境变量 GITLAB_EXCLUDE_OWNERS）")
     parser.add_argument("--languages", default=",".join(DEFAULT_LANGUAGES),
                         help="填入 CSV 的技术栈（逗号分隔，小写）")
     parser.add_argument("--group", default="", help="仅导出指定群组前缀下的项目（path_with_namespace 前缀匹配，逗号分隔多个）")
     parser.add_argument("--skip-archived", action="store_true", help="跳过 GitLab 中已归档的项目")
     parser.add_argument("--gitlab-url", default=os.environ.get("GITLAB_API_URL", DEFAULT_GITLAB_URL),
-                        help="GitLab API v4 地址")
+                        help="GitLab API v4 地址（必需，可用环境变量 GITLAB_API_URL 提供）")
     parser.add_argument("--gitlab-token", default=os.environ.get("sfx_git_token", ""),
                         help="GitLab PAT（默认取环境变量 sfx_git_token）")
     parser.add_argument("--gitlab-cred-file", default="~/.git-credentials",
                         help="无 PAT 时的凭据文件回退（Basic 认证）")
     parser.add_argument("--output", default="",
-                        help="CSV 输出路径（默认写入 frontend/public 与 frontend/dist）")
+                        help="CSV 输出路径（默认写入 scripts/local_data，该目录已被 .gitignore 忽略）")
     parser.add_argument("--sleep", type=float, default=0.05, help="串行模式（--concurrency 1）下每项间隔秒数")
     parser.add_argument("--concurrency", type=int, default=8, help="并发数（同时获取项目成员的并发，1=串行）")
     parser.add_argument("--per-page", type=int, default=100, help="GitLab 分页大小（最大 100）")
@@ -344,6 +353,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+
+    if not args.gitlab_url:
+        print(
+            "❌ 缺少 GitLab 地址：请设置环境变量或使用 --gitlab-url 传入\n"
+            "   export GITLAB_API_URL=https://<your-gitlab-host>/api/v4"
+        )
+        return 2
+
     stats = Stats()
     exclude_owners = {u.strip().lower() for u in args.exclude_owners.split(",") if u.strip()}
     languages = [x.strip().lower() for x in args.languages.split(",") if x.strip()]
