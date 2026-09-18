@@ -312,6 +312,9 @@ build_and_push() {
         # --provenance=false --sbom=false: 禁用 attestation, 产出 SWR 可接受的单一 manifest;
         #   否则 SWR 报 "Invalid image, fail to parse 'manifest.json'"
         local bx_args=(buildx build --push --provenance=false --sbom=false -f "${dockerfile}" -t "${swr_image}")
+        # 透传宿主代理: sandbox Dockerfile 的 GitHub 下载步骤需要 (BuildKit 不自动注入 shell 代理)
+        [[ -n "${HTTPS_PROXY:-}" ]] && bx_args+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY}")
+        [[ -n "${HTTP_PROXY:-}" ]]  && bx_args+=(--build-arg "HTTP_PROXY=${HTTP_PROXY}")
         [[ -n "${PLATFORM}" ]]      && bx_args+=(--platform "${PLATFORM}")
         [[ -n "${BUILDER}" ]]       && bx_args+=(--builder "${BUILDER}")
         [[ "${NO_CACHE}" == true ]] && bx_args+=(--no-cache)
@@ -328,6 +331,8 @@ build_and_push() {
 
     # ---- --no-push: 仅构建并标记到本地 ----
     local build_args=(-f "${dockerfile}" -t "${local_image}")
+    [[ -n "${HTTPS_PROXY:-}" ]] && build_args+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY}")
+    [[ -n "${HTTP_PROXY:-}" ]]  && build_args+=(--build-arg "HTTP_PROXY=${HTTP_PROXY}")
     [[ -n "${PLATFORM}" ]]      && build_args+=(--platform "${PLATFORM}")
     [[ "${NO_CACHE}" == true ]] && build_args+=(--no-cache)
     print_info "[1/2] 构建镜像: ${local_image}  (context=${context})"
