@@ -154,6 +154,12 @@ class Settings(BaseSettings):
     RAG_CHUNK_OVERLAP: int = 50  # 代码块重叠（Token）
     RAG_TOP_K: int = 10  # 检索返回数量
 
+    # 批量报告下载配置
+    REPORT_DOWNLOAD_OUTPUT_DIR: str = "./data/report_downloads"  # 报告默认存储根目录
+    REPORT_DOWNLOAD_MAX_CONCURRENCY: int = 20  # 单任务允许的最大并发下载数
+    REPORT_DOWNLOAD_HTTP_TIMEOUT: int = 30  # GitLab API 请求超时（秒）
+    REPORT_DOWNLOAD_HTTP_RETRIES: int = 3  # GitLab API 瞬时错误重试次数
+
     # 定时批量审计配置
     BATCH_AUDIT_ENABLED: bool = True  # 是否启用调度器
     BATCH_AUDIT_MAX_CONCURRENCY: int = 10  # 单批次允许的最大并发项目数

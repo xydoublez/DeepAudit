@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, users, projects, tasks, scan, members, config, database, prompts, rules, agent_tasks, embedding_config, ssh_keys, sso, batch_audit
+from app.api.v1.endpoints import auth, users, projects, tasks, scan, members, config, database, prompts, rules, agent_tasks, embedding_config, ssh_keys, sso, batch_audit, report_downloads
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -17,3 +17,4 @@ api_router.include_router(agent_tasks.router, prefix="/agent-tasks", tags=["agen
 api_router.include_router(embedding_config.router, prefix="/embedding", tags=["embedding"])
 api_router.include_router(ssh_keys.router, prefix="/ssh-keys", tags=["ssh-keys"])
 api_router.include_router(batch_audit.router, prefix="/batch-audit", tags=["batch-audit"])
+api_router.include_router(report_downloads.router, prefix="/report-downloads", tags=["report-downloads"])

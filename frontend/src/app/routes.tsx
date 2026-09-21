@@ -5,6 +5,7 @@ import RecycleBin from "@/pages/RecycleBin";
 import InstantAnalysis from "@/pages/InstantAnalysis";
 import AuditTasks from "@/pages/AuditTasks";
 import BatchAudit from "@/pages/BatchAudit";
+import BatchReportDownload from "@/pages/BatchReportDownload";
 import TaskDetail from "@/pages/TaskDetail";
 import AgentAudit from "@/pages/AgentAudit";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -67,6 +68,12 @@ const routes: RouteConfig[] = [
     name: "批量定时审计",
     path: "/batch-audit",
     element: <BatchAudit />,
+    visible: true,
+  },
+  {
+    name: "批量报告下载",
+    path: "/batch-report-download",
+    element: <BatchReportDownload />,
     visible: true,
   },
   {

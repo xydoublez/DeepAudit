@@ -14,6 +14,10 @@ from .batch_audit import (
     AuditSchedule, AuditBatchRun, AuditBatchRunItem,
     ScheduleType, ProjectScope, BatchRunStatus, BatchRunItemStatus,
 )
+from .report_download import (
+    ReportDownloadTask, ReportDownloadItem,
+    DownloadTaskStatus, DownloadItemStatus, FilenamePattern,
+)
 
 
 
