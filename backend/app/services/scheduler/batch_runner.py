@@ -8,6 +8,8 @@
   该函数内部自建数据库会话，天然支持并发
 - 单项目失败不影响其他项目
 - 每个项目状态变化即刻原子更新批次计数，前端轮询可见实时进度
+- 强制执行单项目超时（task_template.timeout_seconds）：执行协程 hang 死时
+  回收明细并释放并发额度，避免连锁堵死整个批次（运行期兜底见 watchdog 模块）
 """
 
 import asyncio
@@ -159,6 +161,15 @@ async def _resolve_projects(
 
 # ============ 单项目执行 ============
 
+def _item_timeout_seconds(template: Dict[str, Any]) -> int:
+    """单项目审计超时（与 AgentTaskCreate.timeout_seconds 校验对齐：60..7200，默认 1800）"""
+    try:
+        raw = int(template.get("timeout_seconds") or 1800)
+    except (TypeError, ValueError):
+        raw = 1800
+    return max(60, min(7200, raw))
+
+
 async def _execute_one(
     semaphore: asyncio.Semaphore,
     run_id: str,
@@ -199,7 +210,9 @@ async def _execute_one(
                 # 延迟导入，避免 api 层与服务层循环依赖
                 from app.api.v1.endpoints.agent_tasks import (
                     _execute_agent_task,
+                    _mark_task_terminal_if_pending,
                     is_task_cancelled,
+                    request_agent_task_cancellation,
                 )
 
                 task = await _create_agent_task(
@@ -214,7 +227,47 @@ async def _execute_one(
 
                 # 直接 await：_execute_agent_task 内部自建会话，
                 # 信号量保证「最多 concurrency 个项目同时审计，其余排队」
-                await _execute_agent_task(agent_task_id)
+                #
+                # 🔥 超时强制执行（此前 timeout_seconds 只写库从未生效）：
+                # 高负载下执行协程可能 hang 死在不可中断调用（git clone / Docker
+                # SDK / LLM 死锁），裸 await 会让明细永远停在 RUNNING、信号量额度
+                # 永不释放，连锁堵死整个批次。这里必须用 asyncio.wait(timeout=)
+                # 而非 wait_for：wait_for 超时后会等待内部协程处理完取消才抛
+                # TimeoutError，若协程卡死则 wait_for 自身也永久挂起，保护失效。
+                timeout = _item_timeout_seconds(template)
+                exec_task = asyncio.create_task(_execute_agent_task(agent_task_id))
+                try:
+                    await asyncio.wait({exec_task}, timeout=timeout)
+                except asyncio.CancelledError:
+                    # 批次取消/服务停机：把取消传播给执行协程，由其 handler 收尾
+                    exec_task.cancel()
+                    raise
+
+                if not exec_task.done():
+                    # 🔥 超时回收：任务已 hang 死。先落 AgentTask 终态，再尽力
+                    # 终止僵尸协程（置取消标志，阻止其后续把状态改回 completed），
+                    # 不等待其真正退出 —— 卡死的协程可能永远不响应取消。
+                    logger.warning(
+                        f"[BatchRunner] Run {run_id} project '{project_name}' timed out "
+                        f"after {timeout}s (agent_task={agent_task_id}); reclaiming"
+                    )
+                    await _mark_task_terminal_if_pending(
+                        agent_task_id,
+                        AgentTaskStatus.FAILED,
+                        error_message=f"审计超时（>{timeout}s），已被批量执行引擎强制回收",
+                    )
+                    request_agent_task_cancellation(agent_task_id)
+                    exec_task.cancel()
+                    await _set_item_status(
+                        item_id,
+                        BatchRunItemStatus.FAILED,
+                        error_message=f"审计超时（>{timeout}s），已被强制回收",
+                        finished=True,
+                    )
+                    await _apply_counter_delta(run_id, running_count=-1, failed_count=1)
+                    return
+
+                await exec_task
 
                 result = await _read_agent_task_result(agent_task_id)
                 status = result["status"]

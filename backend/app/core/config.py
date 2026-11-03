@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "changethis_in_production_to_a_long_random_string"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
-    
+
     # CORS
     BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
 
@@ -165,6 +165,10 @@ class Settings(BaseSettings):
     BATCH_AUDIT_MAX_CONCURRENCY: int = 10  # 单批次允许的最大并发项目数
     BATCH_AUDIT_TICK_SECONDS: int = 30  # 调度器轮询间隔（秒）
     BATCH_AUDIT_SHUTDOWN_TIMEOUT: int = 25  # 停机时等待在跑批次收尾的上限（秒），须小于容器 stop_grace_period
+
+    # Agent 任务看门狗：周期对账回收「状态停在 running/pending 但执行协程已 hang 死」
+    # 的僵尸任务/明细/批次（运行期自愈，无需重启服务）；<= 0 禁用
+    AGENT_TASK_WATCHDOG_INTERVAL: int = 60  # 扫描间隔（秒）
 
     # 数据库连接池
     # ⚠️ 批量审计下每个 AgentTask 会全程独占一个连接（会话包住整个审计生命周期），

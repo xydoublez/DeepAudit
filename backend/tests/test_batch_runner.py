@@ -682,3 +682,127 @@ class TestStartBatchRun:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+# ============ ⑤ hang 死任务的超时回收 ============
+
+class TestTimeoutEnforcement:
+    """timeout_seconds 此前只写库从未被执行：hang 死的执行协程会让明细
+    永远停在 RUNNING、信号量额度永不释放，连锁堵死整个批次。"""
+
+    def test_timeout_clamped_to_api_bounds(self):
+        assert batch_runner._item_timeout_seconds({}) == 1800
+        assert batch_runner._item_timeout_seconds({"timeout_seconds": 10}) == 60
+        assert batch_runner._item_timeout_seconds({"timeout_seconds": 99999}) == 7200
+        assert batch_runner._item_timeout_seconds({"timeout_seconds": "abc"}) == 1800
+        assert batch_runner._item_timeout_seconds({"timeout_seconds": 3600}) == 3600
+
+    async def test_hung_task_is_reclaimed_and_slot_released(self, monkeypatch):
+        """执行协程 hang 死（超时窗口内绝不返回）→ 超时后明细标 failed，并发额度释放给后续项目"""
+        recorder = Recorder(delay=0)
+        recorder.install(monkeypatch)
+
+        # 缩短超时（clamp 下限 60s，测试直接注入小值）
+        monkeypatch.setattr(batch_runner, "_item_timeout_seconds", lambda template: 0.05)
+
+        terminal_calls: List[Any] = []
+        cancel_requests: List[str] = []
+
+        async def fake_mark_terminal(task_id, status, error_message=None):
+            terminal_calls.append((task_id, status))
+
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.agent_tasks._mark_task_terminal_if_pending",
+            fake_mark_terminal,
+        )
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.agent_tasks.request_agent_task_cancellation",
+            cancel_requests.append,
+        )
+
+        async def dispatch(task_id: str) -> None:
+            if task_id == "task-proj-0":
+                # 模拟 hang 死：卡在永不完成的等待上（协程在超时窗口内绝不返回；
+                # 用可响应取消的 Future，避免 teardown 的 _cancel_all_tasks 永久阻塞）
+                await asyncio.get_running_loop().create_future()
+            recorder.executed.append(task_id)
+
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.agent_tasks._execute_agent_task", dispatch
+        )
+
+        # 单并发：若 hang 死任务的额度不释放，item-1 将永远排队
+        semaphore = asyncio.Semaphore(1)
+        await asyncio.wait_for(
+            asyncio.gather(
+                batch_runner._execute_one(
+                    semaphore, RUN_ID, _make_item(0), {}, CREATED_BY
+                ),
+                batch_runner._execute_one(
+                    semaphore, RUN_ID, _make_item(1), {}, CREATED_BY
+                ),
+                return_exceptions=True,
+            ),
+            timeout=5,
+        )
+
+        # hang 死明细被回收为 failed，错误信息含超时说明
+        assert recorder.final_status["item-0"] == BatchRunItemStatus.FAILED
+        assert "超时" in recorder.errors["item-0"]
+        # 并发额度已释放，后续项目正常完成
+        assert recorder.final_status["item-1"] == BatchRunItemStatus.COMPLETED
+        assert "task-proj-1" in recorder.executed
+        # AgentTask 落终态 failed + 请求取消僵尸协程（阻止其苏醒后改回 completed）
+        assert terminal_calls == [("task-proj-0", AgentTaskStatus.FAILED)]
+        assert cancel_requests == ["task-proj-0"]
+        # 批次计数收敛
+        assert recorder.counters["running_count"] == 0
+        assert recorder.counters["failed_count"] == 1
+        assert recorder.counters["completed_count"] == 1
+
+    async def test_normal_task_not_affected_by_timeout_wrapper(self, monkeypatch):
+        """未超时的任务照常完成：asyncio.wait 包装不改变成功路径语义"""
+        recorder = Recorder(delay=0.01)
+        recorder.install(monkeypatch)
+        monkeypatch.setattr(batch_runner, "_item_timeout_seconds", lambda t: 5)
+
+        await _drive([_make_item(i) for i in range(6)], concurrency=2)
+
+        assert len(recorder.executed) == 6
+        assert all(
+            s == BatchRunItemStatus.COMPLETED
+            for s in recorder.final_status.values()
+        )
+        assert recorder.counters["failed_count"] == 0
+
+    async def test_batch_cancel_propagates_to_exec_task(self, monkeypatch):
+        """批次取消时取消信号必须传播给执行协程（不得因 create_task 包装而丢失）"""
+        recorder = Recorder(delay=0)
+        recorder.install(monkeypatch)
+        monkeypatch.setattr(batch_runner, "_item_timeout_seconds", lambda t: 30)
+
+        inner_cancelled = asyncio.Event()
+
+        async def dispatch(task_id: str) -> None:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                inner_cancelled.set()
+                raise
+
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.agent_tasks._execute_agent_task", dispatch
+        )
+
+        semaphore = asyncio.Semaphore(1)
+        outer = asyncio.ensure_future(
+            batch_runner._execute_one(semaphore, RUN_ID, _make_item(0), {}, CREATED_BY)
+        )
+        await asyncio.sleep(0.05)
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+
+        assert inner_cancelled.is_set()
+        # 外层取消 handler 正常收尾明细
+        assert recorder.final_status["item-0"] == BatchRunItemStatus.CANCELLED

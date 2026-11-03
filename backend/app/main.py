@@ -101,7 +101,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("定时批量审计调度器已禁用 (BATCH_AUDIT_ENABLED=false)")
 
+    # 启动 Agent 任务看门狗（独立于批量调度：单任务路径的僵尸同样需要对账回收）
+    try:
+        from app.services.scheduler.watchdog import start_watchdog
+        await start_watchdog()
+    except Exception as e:
+        logger.error(f"Agent 任务看门狗启动失败: {e}", exc_info=True)
+
     yield
+
+    # 停止 Agent 任务看门狗
+    try:
+        from app.services.scheduler.watchdog import stop_watchdog
+        await stop_watchdog()
+    except Exception as e:
+        logger.warning(f"Agent 任务看门狗停止异常: {e}")
 
     # 停止定时批量审计调度器
     if settings.BATCH_AUDIT_ENABLED:
