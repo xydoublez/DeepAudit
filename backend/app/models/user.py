@@ -19,6 +19,12 @@ class User(Base):
     role = Column(String, default="member")
     github_username = Column(String, nullable=True)
     gitlab_username = Column(String, nullable=True)
+
+    # API Key（三方接口调用，仅存储哈希）
+    api_key_hash = Column(String(64), unique=True, index=True, nullable=True)
+    api_key_prefix = Column(String(16), nullable=True)
+    api_key_created_at = Column(DateTime(timezone=True), nullable=True)
+    api_key_expires_at = Column(DateTime(timezone=True), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

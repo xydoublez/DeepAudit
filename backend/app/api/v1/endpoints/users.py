@@ -1,5 +1,6 @@
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -7,9 +8,18 @@ from sqlalchemy import func, or_
 
 from app.api import deps
 from app.core import security
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.user import User as UserSchema, UserCreate, UserUpdate, UserListResponse
+from app.schemas.user import (
+    User as UserSchema,
+    UserCreate,
+    UserUpdate,
+    UserListResponse,
+    ApiKeyInfo,
+    ApiKeyCreateRequest,
+    ApiKeyCreateResponse,
+)
 
 router = APIRouter()
 
@@ -111,29 +121,128 @@ async def update_user_me(
     *,
     db: AsyncSession = Depends(get_db),
     user_in: UserUpdate,
-    current_user: User = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_user_jwt_only),
 ) -> Any:
     """
     更新当前用户信息
+
+    仅接受登录会话（JWT），API Key 不可修改账号资料/密码，
+    防止凭据泄露后借 API Key 篡改账号。
     """
     update_data = user_in.model_dump(exclude_unset=True)
-    
+
     # 普通用户不能修改自己的角色和超级管理员状态
     update_data.pop('role', None)
     update_data.pop('is_superuser', None)
     update_data.pop('is_active', None)
-    
+
     # 如果更新密码
+    password_changed = False
     if 'password' in update_data and update_data['password']:
         update_data['hashed_password'] = security.get_password_hash(update_data['password'])
+        password_changed = True
     update_data.pop('password', None)
-    
+
     for field, value in update_data.items():
         setattr(current_user, field, value)
-    
+
+    # 改密联动吊销：密码变更后现有 API Key 立即失效
+    if password_changed:
+        current_user.api_key_hash = None
+        current_user.api_key_prefix = None
+        current_user.api_key_created_at = None
+        current_user.api_key_expires_at = None
+
     await db.commit()
     await db.refresh(current_user)
     return current_user
+
+
+# ============ API Key 管理（三方接口调用） ============
+
+def _api_key_info(user: User) -> ApiKeyInfo:
+    is_expired = False
+    if user.api_key_expires_at:
+        expires_at = user.api_key_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        is_expired = expires_at < datetime.now(timezone.utc)
+    return ApiKeyInfo(
+        has_api_key=bool(user.api_key_hash),
+        api_key_prefix=user.api_key_prefix,
+        api_key_created_at=user.api_key_created_at,
+        api_key_expires_at=user.api_key_expires_at,
+        is_expired=is_expired,
+    )
+
+@router.get("/me/api-key", response_model=ApiKeyInfo)
+async def get_my_api_key(
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    """查询当前用户 API Key 状态（不含 Key 本体）"""
+    return _api_key_info(current_user)
+
+@router.post("/me/api-key", response_model=ApiKeyCreateResponse)
+async def create_my_api_key(
+    *,
+    db: AsyncSession = Depends(get_db),
+    request: ApiKeyCreateRequest,
+    current_user: User = Depends(deps.get_current_user_jwt_only),
+) -> Any:
+    """
+    生成（或重新生成）API Key，默认有效期一年
+
+    安全约束：
+    - 仅接受登录会话（JWT），API Key 不可自我续期
+    - 需密码再确认，防止被盗的短时 JWT 兑换长效凭据
+    - 完整 Key 仅本次响应返回一次，服务端只存哈希
+    - 重新生成后旧 Key 立即失效；修改密码会联动吊销
+    """
+    expires_days = (
+        request.expires_days
+        if request.expires_days is not None
+        else settings.API_KEY_EXPIRE_DAYS
+    )
+    if not 1 <= expires_days <= 3650:
+        raise HTTPException(status_code=400, detail="有效期必须在 1 ~ 3650 天之间")
+
+    # 密码再确认
+    if not request.password or not security.verify_password(
+        request.password, current_user.hashed_password
+    ):
+        raise HTTPException(status_code=401, detail="密码确认失败")
+
+    raw_key, key_hash, key_prefix = security.generate_api_key()
+    now = datetime.now(timezone.utc)
+    current_user.api_key_hash = key_hash
+    current_user.api_key_prefix = key_prefix
+    current_user.api_key_created_at = now
+    current_user.api_key_expires_at = now + timedelta(days=expires_days)
+    await db.commit()
+    await db.refresh(current_user)
+
+    return ApiKeyCreateResponse(
+        api_key=raw_key,
+        api_key_prefix=key_prefix,
+        api_key_created_at=current_user.api_key_created_at,
+        api_key_expires_at=current_user.api_key_expires_at,
+    )
+
+@router.delete("/me/api-key", response_model=ApiKeyInfo)
+async def revoke_my_api_key(
+    *,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(deps.get_current_user_jwt_only),
+) -> Any:
+    """吊销 API Key（立即失效，仅登录会话可操作）"""
+    current_user.api_key_hash = None
+    current_user.api_key_prefix = None
+    current_user.api_key_created_at = None
+    current_user.api_key_expires_at = None
+    await db.commit()
+    await db.refresh(current_user)
+    return _api_key_info(current_user)
+
 
 @router.get("/{user_id}", response_model=UserSchema)
 async def read_user(
@@ -167,15 +276,24 @@ async def update_user(
         raise HTTPException(status_code=404, detail="用户不存在")
     
     update_data = user_in.model_dump(exclude_unset=True)
-    
+
     # 如果更新密码
+    password_changed = False
     if 'password' in update_data and update_data['password']:
         update_data['hashed_password'] = security.get_password_hash(update_data['password'])
+        password_changed = True
     update_data.pop('password', None)
-    
+
     for field, value in update_data.items():
         setattr(user, field, value)
-    
+
+    # 改密联动吊销：管理员重置用户密码后，该用户现有 API Key 立即失效
+    if password_changed:
+        user.api_key_hash = None
+        user.api_key_prefix = None
+        user.api_key_created_at = None
+        user.api_key_expires_at = None
+
     await db.commit()
     await db.refresh(user)
     return user

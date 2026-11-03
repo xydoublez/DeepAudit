@@ -21,7 +21,11 @@ import {
   LogOut,
   UserPlus,
   GitBranch,
-  Terminal
+  Terminal,
+  Copy,
+  RefreshCw,
+  Ban,
+  Code2
 } from "lucide-react";
 import { apiClient } from "@/shared/api/serverClient";
 import { useAuth } from "@/shared/context/AuthContext";
@@ -48,8 +52,24 @@ export default function Account() {
   });
   const [changingPassword, setChangingPassword] = useState(false);
 
+  // API Key 状态
+  interface ApiKeyInfo {
+    has_api_key: boolean;
+    api_key_prefix?: string;
+    api_key_created_at?: string;
+    api_key_expires_at?: string;
+    is_expired: boolean;
+  }
+  const [apiKeyInfo, setApiKeyInfo] = useState<ApiKeyInfo | null>(null);
+  const [newApiKey, setNewApiKey] = useState<string | null>(null);
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [showKeyPasswordDialog, setShowKeyPasswordDialog] = useState(false);
+  const [keyPassword, setKeyPassword] = useState("");
+  const [showRevokeDialog, setShowRevokeDialog] = useState(false);
+
   useEffect(() => {
     loadProfile();
+    loadApiKeyInfo();
   }, []);
 
   const loadProfile = async () => {
@@ -102,8 +122,9 @@ export default function Account() {
     try {
       setChangingPassword(true);
       await apiClient.put('/users/me', { password: passwordForm.new_password });
-      toast.success("密码已更新");
+      toast.success("密码已更新（如有 API Key 将同步吊销）");
       setPasswordForm({ current_password: "", new_password: "", confirm_password: "" });
+      await loadApiKeyInfo();
     } catch (error) {
       console.error('Failed to change password:', error);
       toast.error("密码更新失败");
@@ -119,6 +140,62 @@ export default function Account() {
       month: 'long',
       day: 'numeric'
     });
+  };
+
+  // ============ API Key 管理 ============
+
+  const loadApiKeyInfo = async () => {
+    try {
+      const res = await apiClient.get('/users/me/api-key');
+      setApiKeyInfo(res.data);
+    } catch (error) {
+      console.error('Failed to load API key info:', error);
+    }
+  };
+
+  const handleGenerateApiKey = async () => {
+    if (!keyPassword) {
+      toast.error("请输入登录密码进行确认");
+      return;
+    }
+    try {
+      setApiKeyBusy(true);
+      const res = await apiClient.post('/users/me/api-key', { password: keyPassword });
+      setNewApiKey(res.data.api_key);
+      await loadApiKeyInfo();
+      toast.success("API Key 已生成");
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail;
+      toast.error(detail === "密码确认失败" ? "密码确认失败，请检查登录密码" : "生成 API Key 失败");
+    } finally {
+      setApiKeyBusy(false);
+      setKeyPassword("");
+      setShowKeyPasswordDialog(false);
+    }
+  };
+
+  const handleRevokeApiKey = async () => {
+    try {
+      setApiKeyBusy(true);
+      await apiClient.delete('/users/me/api-key');
+      await loadApiKeyInfo();
+      toast.success("API Key 已吊销");
+    } catch (error) {
+      console.error('Failed to revoke API key:', error);
+      toast.error("吊销 API Key 失败");
+    } finally {
+      setApiKeyBusy(false);
+      setShowRevokeDialog(false);
+    }
+  };
+
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("已复制到剪贴板");
+    } catch {
+      toast.error("复制失败，请手动复制");
+    }
   };
 
   const getInitials = (name?: string, email?: string) => {
@@ -363,7 +440,199 @@ export default function Account() {
             </div>
           </div>
         </div>
+        {/* API Key Management */}
+        <div className="lg:col-span-3 cyber-card p-0">
+          <div className="cyber-card-header">
+            <Code2 className="w-5 h-5 text-emerald-400" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-foreground">API Key（三方接口调用）</h3>
+          </div>
+          <div className="p-6 space-y-4">
+            {apiKeyInfo?.has_api_key ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-muted-foreground uppercase">Key</p>
+                    <p className="text-foreground font-mono text-sm break-all">
+                      {apiKeyInfo.api_key_prefix}****
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-muted-foreground uppercase">创建时间</p>
+                    <p className="text-foreground font-mono text-sm">{formatDate(apiKeyInfo.api_key_created_at)}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-muted-foreground uppercase">有效期至</p>
+                    <p className={`font-mono text-sm ${apiKeyInfo.is_expired ? 'text-rose-400' : 'text-emerald-400'}`}>
+                      {formatDate(apiKeyInfo.api_key_expires_at)}
+                      {apiKeyInfo.is_expired ? '（已过期）' : ''}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-3 pt-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowKeyPasswordDialog(true)}
+                    disabled={apiKeyBusy}
+                    className="cyber-btn-outline h-10"
+                  >
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    重新生成
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => setShowRevokeDialog(true)}
+                    disabled={apiKeyBusy}
+                    className="bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 h-10"
+                  >
+                    <Ban className="w-4 h-4 mr-2" />
+                    吊销
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <p className="text-muted-foreground text-sm">
+                  尚未生成 API Key。生成时需输入登录密码确认，生成后三方系统可通过 <span className="text-primary font-mono">X-API-Key</span> 请求头直接调用审计报告等接口，默认有效期一年。
+                </p>
+                <Button
+                  onClick={() => setShowKeyPasswordDialog(true)}
+                  disabled={apiKeyBusy}
+                  className="cyber-btn-primary h-10 shrink-0"
+                >
+                  {apiKeyBusy ? (
+                    <>
+                      <div className="loading-spinner w-4 h-4 mr-2" />
+                      生成中...
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound className="w-4 h-4 mr-2" />
+                      生成 API Key
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {/* Usage example */}
+            <div className="pt-4 border-t border-border">
+              <p className="text-xs font-bold text-muted-foreground uppercase mb-2">调用示例</p>
+              <pre className="bg-muted/50 border border-border rounded-md p-3 text-xs text-emerald-400 overflow-x-auto">
+{`curl -H "X-API-Key: <你的API Key>" \\
+  "http://<后端地址>/api/v1/agent-tasks/{task_id}/report?format=json"`}
+              </pre>
+            </div>
+          </div>
+        </div>
       </div>
+
+      {/* New API Key Dialog（仅展示一次） */}
+      <AlertDialog open={!!newApiKey} onOpenChange={(open) => !open && setNewApiKey(null)}>
+        <AlertDialogContent className="cyber-card cyber-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-lg font-bold uppercase text-foreground flex items-center gap-2">
+              <KeyRound className="w-5 h-5 text-emerald-400" />
+              API Key 已生成
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 w-full">
+                <p className="text-amber-400 text-sm">
+                  完整 Key 仅显示这一次，服务端只保存哈希，请立即复制并妥善保存！
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 bg-muted/50 border border-border rounded-md p-3 text-xs text-emerald-400 font-mono break-all">
+                    {newApiKey}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => copyText(newApiKey || "")}
+                    className="cyber-btn-outline shrink-0"
+                  >
+                    <Copy className="w-4 h-4 mr-1" />
+                    复制
+                  </Button>
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction className="cyber-btn-primary" onClick={() => setNewApiKey(null)}>
+              我已保存
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Key Password Confirm Dialog（生成/重新生成共用） */}
+      <AlertDialog open={showKeyPasswordDialog} onOpenChange={(open) => { setShowKeyPasswordDialog(open); if (!open) setKeyPassword(""); }}>
+        <AlertDialogContent className="cyber-card cyber-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-lg font-bold uppercase text-foreground flex items-center gap-2">
+              <KeyRound className="w-5 h-5 text-amber-400" />
+              {apiKeyInfo?.has_api_key ? "重新生成 API Key" : "生成 API Key"}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 w-full">
+                <p className="text-muted-foreground">
+                  为保障账号安全，请输入登录密码进行确认。
+                  {apiKeyInfo?.has_api_key ? "重新生成后旧 Key 立即失效，请及时通知三方更新。" : ""}
+                </p>
+                <Input
+                  type="password"
+                  value={keyPassword}
+                  onChange={(e) => setKeyPassword(e.target.value)}
+                  placeholder="登录密码"
+                  className="cyber-input"
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && keyPassword && handleGenerateApiKey()}
+                />
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="cyber-btn-outline">取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => { e.preventDefault(); handleGenerateApiKey(); }}
+              disabled={!keyPassword || apiKeyBusy}
+              className="cyber-btn-primary"
+            >
+              {apiKeyBusy ? (
+                <>
+                  <div className="loading-spinner w-4 h-4 mr-2" />
+                  处理中...
+                </>
+              ) : (
+                "确认并生成"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Revoke Confirm Dialog */}
+      <AlertDialog open={showRevokeDialog} onOpenChange={setShowRevokeDialog}>
+        <AlertDialogContent className="cyber-card border-rose-500/30 cyber-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-lg font-bold uppercase text-foreground flex items-center gap-2">
+              <Ban className="w-5 h-5 text-rose-400" />
+              确认吊销 API Key？
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              吊销后该 Key 立即失效，三方将无法再通过它调用接口。此操作不可撤销，可随时重新生成新 Key。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="cyber-btn-outline">取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleRevokeApiKey}
+              className="bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30"
+            >
+              确认吊销
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Logout Confirmation Dialog */}
       <AlertDialog open={showLogoutDialog} onOpenChange={setShowLogoutDialog}>

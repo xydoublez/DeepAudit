@@ -40,6 +40,29 @@ class UserListResponse(BaseModel):
     limit: int
 
 
+class ApiKeyInfo(BaseModel):
+    """API Key 状态信息（不含 Key 本体）"""
+    has_api_key: bool
+    api_key_prefix: Optional[str] = None
+    api_key_created_at: Optional[object] = None
+    api_key_expires_at: Optional[object] = None
+    is_expired: bool = False
+
+
+class ApiKeyCreateRequest(BaseModel):
+    # 密码再确认：防止短时凭据（被盗 JWT）兑换长效 API Key
+    password: str
+    expires_days: Optional[int] = None  # 有效期（天），默认取配置 API_KEY_EXPIRE_DAYS
+
+
+class ApiKeyCreateResponse(BaseModel):
+    """生成结果：api_key 仅此一次返回，请妥善保存"""
+    api_key: str
+    api_key_prefix: str
+    api_key_created_at: object
+    api_key_expires_at: object
+
+
 
 
 
