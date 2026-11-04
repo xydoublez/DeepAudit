@@ -193,8 +193,8 @@ async def create_my_api_key(
     生成（或重新生成）API Key，默认有效期一年
 
     安全约束：
-    - 仅接受登录会话（JWT），API Key 不可自我续期
-    - 需密码再确认，防止被盗的短时 JWT 兑换长效凭据
+    - 仅接受登录会话（JWT/SSO），API Key 不可自我续期
+    - 登录认证通过即可生成，无需密码再确认（SSO 用户无本地密码）
     - 完整 Key 仅本次响应返回一次，服务端只存哈希
     - 重新生成后旧 Key 立即失效；修改密码会联动吊销
     """
@@ -205,12 +205,6 @@ async def create_my_api_key(
     )
     if not 1 <= expires_days <= 3650:
         raise HTTPException(status_code=400, detail="有效期必须在 1 ~ 3650 天之间")
-
-    # 密码再确认
-    if not request.password or not security.verify_password(
-        request.password, current_user.hashed_password
-    ):
-        raise HTTPException(status_code=401, detail="密码确认失败")
 
     raw_key, key_hash, key_prefix = security.generate_api_key()
     now = datetime.now(timezone.utc)

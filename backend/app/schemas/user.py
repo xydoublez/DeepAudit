@@ -50,8 +50,7 @@ class ApiKeyInfo(BaseModel):
 
 
 class ApiKeyCreateRequest(BaseModel):
-    # 密码再确认：防止短时凭据（被盗 JWT）兑换长效 API Key
-    password: str
+    # 登录会话（JWT/SSO）即为授权依据，无需密码再确认
     expires_days: Optional[int] = None  # 有效期（天），默认取配置 API_KEY_EXPIRE_DAYS
 
 

@@ -63,8 +63,7 @@ export default function Account() {
   const [apiKeyInfo, setApiKeyInfo] = useState<ApiKeyInfo | null>(null);
   const [newApiKey, setNewApiKey] = useState<string | null>(null);
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
-  const [showKeyPasswordDialog, setShowKeyPasswordDialog] = useState(false);
-  const [keyPassword, setKeyPassword] = useState("");
+  const [showRegenConfirmDialog, setShowRegenConfirmDialog] = useState(false);
   const [showRevokeDialog, setShowRevokeDialog] = useState(false);
 
   useEffect(() => {
@@ -154,23 +153,18 @@ export default function Account() {
   };
 
   const handleGenerateApiKey = async () => {
-    if (!keyPassword) {
-      toast.error("请输入登录密码进行确认");
-      return;
-    }
     try {
       setApiKeyBusy(true);
-      const res = await apiClient.post('/users/me/api-key', { password: keyPassword });
+      const res = await apiClient.post('/users/me/api-key', {});
       setNewApiKey(res.data.api_key);
       await loadApiKeyInfo();
       toast.success("API Key 已生成");
     } catch (error: any) {
-      const detail = error?.response?.data?.detail;
-      toast.error(detail === "密码确认失败" ? "密码确认失败，请检查登录密码" : "生成 API Key 失败");
+      console.error('Failed to generate API key:', error);
+      toast.error("生成 API Key 失败");
     } finally {
       setApiKeyBusy(false);
-      setKeyPassword("");
-      setShowKeyPasswordDialog(false);
+      setShowRegenConfirmDialog(false);
     }
   };
 
@@ -471,7 +465,7 @@ export default function Account() {
                 <div className="flex flex-wrap gap-3 pt-2">
                   <Button
                     variant="outline"
-                    onClick={() => setShowKeyPasswordDialog(true)}
+                    onClick={() => setShowRegenConfirmDialog(true)}
                     disabled={apiKeyBusy}
                     className="cyber-btn-outline h-10"
                   >
@@ -492,10 +486,10 @@ export default function Account() {
             ) : (
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 <p className="text-muted-foreground text-sm">
-                  尚未生成 API Key。生成时需输入登录密码确认，生成后三方系统可通过 <span className="text-primary font-mono">X-API-Key</span> 请求头直接调用审计报告等接口，默认有效期一年。
+                  尚未生成 API Key。登录认证通过后即可直接生成，生成后三方系统可通过 <span className="text-primary font-mono">X-API-Key</span> 请求头直接调用审计报告等接口，默认有效期一年。
                 </p>
                 <Button
-                  onClick={() => setShowKeyPasswordDialog(true)}
+                  onClick={handleGenerateApiKey}
                   disabled={apiKeyBusy}
                   className="cyber-btn-primary h-10 shrink-0"
                 >
@@ -564,37 +558,23 @@ export default function Account() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Key Password Confirm Dialog（生成/重新生成共用） */}
-      <AlertDialog open={showKeyPasswordDialog} onOpenChange={(open) => { setShowKeyPasswordDialog(open); if (!open) setKeyPassword(""); }}>
+      {/* Regenerate Confirm Dialog（无需密码确认） */}
+      <AlertDialog open={showRegenConfirmDialog} onOpenChange={setShowRegenConfirmDialog}>
         <AlertDialogContent className="cyber-card cyber-dialog">
           <AlertDialogHeader>
             <AlertDialogTitle className="text-lg font-bold uppercase text-foreground flex items-center gap-2">
               <KeyRound className="w-5 h-5 text-amber-400" />
-              {apiKeyInfo?.has_api_key ? "重新生成 API Key" : "生成 API Key"}
+              重新生成 API Key
             </AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-3 w-full">
-                <p className="text-muted-foreground">
-                  为保障账号安全，请输入登录密码进行确认。
-                  {apiKeyInfo?.has_api_key ? "重新生成后旧 Key 立即失效，请及时通知三方更新。" : ""}
-                </p>
-                <Input
-                  type="password"
-                  value={keyPassword}
-                  onChange={(e) => setKeyPassword(e.target.value)}
-                  placeholder="登录密码"
-                  className="cyber-input"
-                  autoFocus
-                  onKeyDown={(e) => e.key === "Enter" && keyPassword && handleGenerateApiKey()}
-                />
-              </div>
+            <AlertDialogDescription>
+              重新生成后旧 Key 立即失效，请及时通知三方更新。是否继续？
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel className="cyber-btn-outline">取消</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => { e.preventDefault(); handleGenerateApiKey(); }}
-              disabled={!keyPassword || apiKeyBusy}
+              disabled={apiKeyBusy}
               className="cyber-btn-primary"
             >
               {apiKeyBusy ? (
@@ -603,7 +583,7 @@ export default function Account() {
                   处理中...
                 </>
               ) : (
-                "确认并生成"
+                "确认重新生成"
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
